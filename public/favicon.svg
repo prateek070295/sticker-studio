@@ -1,0 +1,30 @@
+
+    <svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+      
+      <g transform="translate(0, 0) scale(0.25)">
+        <defs>
+          <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#ec4899" />
+            <stop offset="100%" stop-color="#be185d" />
+          </linearGradient>
+          <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+            <feDropShadow dx="0" dy="6" stdDeviation="8" flood-opacity="0.25"/>
+          </filter>
+        </defs>
+        
+        <!-- White Die-Cut Backing Outline -->
+        <rect x="18" y="18" width="220" height="220" rx="48" fill="#ffffff" filter="url(#shadow)"/>
+        
+        <!-- Inner Vibrant Pink Badge -->
+        <rect x="28" y="28" width="200" height="200" rx="40" fill="url(#grad)"/>
+        
+        <!-- Die-Cut Dashed Guide -->
+        <rect x="23" y="23" width="210" height="210" rx="44" fill="none" stroke="#fbcfe8" stroke-width="3" stroke-dasharray="8,6" opacity="0.6"/>
+
+        <!-- Scissors Icon -->
+        <g fill="#ffffff" transform="translate(68, 68) scale(5)">
+          <path d="M6 3a3 3 0 1 0 0 6 3 3 0 0 0 2.12-.88L12 12l-3.88 3.88A3 3 0 1 0 6 21a3 3 0 0 0 2.83-2H13l2-2h4a1 1 0 0 0 0-2h-3l-2-2 2-2h3a1 1 0 0 0 0-2h-4l-2-2H8.83A3 3 0 0 0 6 3zm0 2a1 1 0 1 1 0 2 1 1 0 0 1 0-2zm0 12a1 1 0 1 1 0 2 1 1 0 0 1 0-2z" />
+        </g>
+      </g>
+    </svg>
+  

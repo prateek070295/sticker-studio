@@ -1,0 +1,25 @@
+# Security and caching headers for Sticker Studio on Cloudflare Pages
+
+# Default headers for all routes
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+
+# Service worker and register script must not be cached by HTTP proxies so updates trigger immediately
+/sw.js
+  Cache-Control: public, max-age=0, must-revalidate
+  Content-Type: application/javascript; charset=utf-8
+
+/registerSW.js
+  Cache-Control: public, max-age=0, must-revalidate
+  Content-Type: application/javascript; charset=utf-8
+
+/manifest.webmanifest
+  Cache-Control: public, max-age=0, must-revalidate
+  Content-Type: application/manifest+json; charset=utf-8
+
+# Hashed assets in /assets/ are immutable and can be cached permanently
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
