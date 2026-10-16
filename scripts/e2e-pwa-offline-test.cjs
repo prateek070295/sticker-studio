@@ -24,8 +24,9 @@ async function runPWAOfflineTest() {
 
   try {
     // 1. Initial Load Online
-    console.log('Step 1: Loading application on http://localhost:4173/ ...');
-    await page.goto('http://localhost:4173/', { waitUntil: 'networkidle' });
+    const APP_URL = process.env.APP_URL || 'http://localhost:4173/';
+    console.log(`Step 1: Loading application on ${APP_URL} ...`);
+    await page.goto(APP_URL, { waitUntil: 'networkidle' });
     console.log('✓ Initial page loaded successfully.');
 
     // 2. Verify Manifest and Icons

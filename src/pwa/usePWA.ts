@@ -1,13 +1,12 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { registerSW } from 'virtual:pwa-register';
 
 export interface BeforeInstallPromptEvent extends Event {
-  readonly platforms: string[];
-  readonly userChoice: Promise<{
-    outcome: 'accepted' | 'dismissed';
-    platform: string;
-  }>;
+  readonly userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
   prompt(): Promise<void>;
 }
+
+const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000; // hourly, so long-open windows still see new releases
 
 export function usePWA() {
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
@@ -15,121 +14,69 @@ export function usePWA() {
   const [isOfflineReady, setIsOfflineReady] = useState<boolean>(false);
   const [needRefresh, setNeedRefresh] = useState<boolean>(false);
   const [isInstallModalOpen, setIsInstallModalOpen] = useState<boolean>(false);
+  const updateSWRef = useRef<((reload?: boolean) => Promise<void>) | null>(null);
 
   useEffect(() => {
-    // 1. Check if already installed / standalone
-    const checkStandalone = () => {
-      const isStandaloneMode =
-        window.matchMedia('(display-mode: standalone)').matches ||
-        (window.navigator as any).standalone === true ||
-        document.referrer.includes('android-app://');
-      setIsStandalone(Boolean(isStandaloneMode));
-    };
-
-    checkStandalone();
     const mediaQuery = window.matchMedia('(display-mode: standalone)');
+    const checkStandalone = () =>
+      setIsStandalone(mediaQuery.matches || (window.navigator as any).standalone === true);
+    checkStandalone();
     mediaQuery.addEventListener?.('change', checkStandalone);
 
-    // 2. Listen for BeforeInstallPromptEvent
-    const handleBeforeInstallPrompt = (e: Event) => {
-      e.preventDefault();
+    const onBeforeInstall = (e: Event) => {
+      e.preventDefault(); // keep the browser's mini-infobar quiet; we offer a single subtle button instead
       setInstallPrompt(e as BeforeInstallPromptEvent);
     };
-
-    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-
-    // 3. Listen for appinstalled
-    const handleAppInstalled = () => {
+    const onInstalled = () => {
       setInstallPrompt(null);
       setIsStandalone(true);
     };
+    window.addEventListener('beforeinstallprompt', onBeforeInstall);
+    window.addEventListener('appinstalled', onInstalled);
 
-    window.addEventListener('appinstalled', handleAppInstalled);
-
-    // 4. Verify offline readiness via Service Worker and Cache Storage
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.ready.then(async (registration) => {
-        if (registration.active) {
-          try {
-            const cacheNames = await caches.keys();
-            const hasWorkboxCache = cacheNames.some(name => name.includes('workbox') || name.includes('precache'));
-            if (hasWorkboxCache) {
-              setIsOfflineReady(true);
-            }
-          } catch (e) {
-            // Non-critical cache inspection
-          }
-        }
-      });
-
-      // Periodic check for cache readiness within first few seconds
-      const interval = setInterval(async () => {
-        try {
-          const keys = await caches.keys();
-          if (keys.some(k => k.includes('workbox') || k.includes('precache'))) {
-            setIsOfflineReady(true);
-            clearInterval(interval);
-          }
-        } catch (e) {
-          clearInterval(interval);
-        }
-      }, 1500);
-
-      // Check for waiting service worker (updates)
-      navigator.serviceWorker.getRegistration().then(reg => {
-        if (reg?.waiting) {
-          setNeedRefresh(true);
-        }
-      });
-
-      return () => {
-        clearInterval(interval);
-        window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-        window.removeEventListener('appinstalled', handleAppInstalled);
-        mediaQuery.removeEventListener?.('change', checkStandalone);
-      };
-    }
+    // onOfflineReady fires only after the service worker has installed, i.e. every precached
+    // asset was downloaded successfully. onNeedRefresh fires when a new version is fully
+    // downloaded and waiting; it is never activated until the user chooses to reload.
+    let timer: number | undefined;
+    updateSWRef.current = registerSW({
+      onOfflineReady: () => setIsOfflineReady(true),
+      onNeedRefresh: () => setNeedRefresh(true),
+      onRegisteredSW: (_url, registration) => {
+        if (registration?.active) setIsOfflineReady(true); // returning visit: already installed
+        if (registration) timer = window.setInterval(() => registration.update(), UPDATE_CHECK_INTERVAL_MS);
+      }
+    });
 
     return () => {
-      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-      window.removeEventListener('appinstalled', handleAppInstalled);
+      window.clearInterval(timer);
+      window.removeEventListener('beforeinstallprompt', onBeforeInstall);
+      window.removeEventListener('appinstalled', onInstalled);
       mediaQuery.removeEventListener?.('change', checkStandalone);
     };
   }, []);
 
   const triggerInstall = useCallback(async () => {
-    if (installPrompt) {
-      try {
-        await installPrompt.prompt();
-        const choice = await installPrompt.userChoice;
-        if (choice.outcome === 'accepted') {
-          setInstallPrompt(null);
-        }
-      } catch (err) {
-        setIsInstallModalOpen(true);
-      }
-    } else {
-      // Automatic beforeinstallprompt unavailable, open educational installation modal
+    if (!installPrompt) {
+      setIsInstallModalOpen(true); // browser offers no install event: show manual instructions
+      return;
+    }
+    try {
+      await installPrompt.prompt();
+      if ((await installPrompt.userChoice).outcome === 'accepted') setInstallPrompt(null);
+    } catch {
       setIsInstallModalOpen(true);
     }
   }, [installPrompt]);
 
+  // Activates the waiting worker, then reloads once it controls the page, so the reload
+  // can never mix old HTML with new assets.
   const reloadApp = useCallback(() => {
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.getRegistration().then(reg => {
-        if (reg?.waiting) {
-          reg.waiting.postMessage({ type: 'SKIP_WAITING' });
-        }
-        window.location.reload();
-      });
-    } else {
-      window.location.reload();
-    }
+    if (updateSWRef.current) updateSWRef.current(true);
+    else window.location.reload();
   }, []);
 
   return {
-    canInstall: !isStandalone && (Boolean(installPrompt) || !isStandalone),
-    hasNativePrompt: Boolean(installPrompt),
+    canInstall: !isStandalone,
     isStandalone,
     isOfflineReady,
     needRefresh,

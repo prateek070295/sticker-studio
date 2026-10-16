@@ -186,7 +186,16 @@ export default function App() {
         onInstallClick={triggerInstall}
         isOfflineReady={isOfflineReady}
         needRefresh={needRefresh}
-        onRefreshClick={reloadApp}
+        onRefreshClick={() => {
+          if (isProcessing || exportProgress) {
+            alert('Please wait for the current extraction or export to finish, then click Update again.');
+            return;
+          }
+          if (sourceImage && !confirm('Updating reloads Sticker Studio. Your current sheet, groups and mask edits will be cleared — export anything you need first.\n\nUpdate now?')) {
+            return;
+          }
+          reloadApp();
+        }}
       />
 
       {/* Main Workspace Body */}

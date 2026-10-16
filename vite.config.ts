@@ -13,7 +13,7 @@ export default defineConfig({
   plugins: [
     VitePWA({
       registerType: 'prompt',
-      injectRegister: 'auto',
+      injectRegister: false,
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,jpg,jpeg,webp,wasm}'],
         maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
