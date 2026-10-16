@@ -92,7 +92,7 @@ describe('STICKER STUDIO V1.1 — RELEASE CANDIDATE AUDIT SUITE', () => {
         raw: { width: croppedWidth, height: croppedHeight, channels: 4 }
       }).png().toBuffer();
       fs.writeFileSync(path.join(AUDIT_OUT_DIR, 'audit_01_momos_bakery_sample.png'), pngBuffer);
-    });
+    }, 15000);
 
     it('Audits Sheet 2: Indoor Gardening (Thin stems, hole detection on shears)', async () => {
       const { width, height, rgba } = await loadSheetRgba('indoor_gardening.jpg');

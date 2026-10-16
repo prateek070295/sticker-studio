@@ -205,4 +205,73 @@ describe('Real Kawaii Sticker Sheets Pipeline Verification', () => {
       fs.writeFileSync(path.join(OUTPUT_DIR, `misos_aquarium_${group.name}.png`), pngBuffer);
     }
   });
+
+  it('processes Chai Break: unifies circular badges ("CHAI APPROVED" & "Chai Break Department") into single stickers', async () => {
+    const { width, height, rgba } = await loadSheetRgba('chai_break.jpg');
+    const bgColor = estimateBackgroundColor(rgba, width, height);
+    const { alphaMask, foregroundSupport } = segmentForeground(rgba, width, height, bgColor, 18, 1.0);
+    const { components, labelMap } = analyzeComponents(foregroundSupport, width, height, 15);
+    const groups = proposeStickerGroups(components, 35, true);
+
+    const compMap = new Map(components.map(c => [c.id, c]));
+
+    // 1. Verify CHAI APPROVED badge (Row 5, Col 1: x: 20..220, y: 830..990)
+    // Find group containing the badge
+    const chaiApprovedGroup = groups.find(g =>
+      g.bounds.x >= 20 && g.bounds.x <= 100 &&
+      g.bounds.y >= 830 && g.bounds.y <= 900 &&
+      g.bounds.width >= 100 && g.bounds.height >= 100
+    );
+    expect(chaiApprovedGroup).toBeDefined();
+
+    // Verify there are no duplicate/split groups inside the CHAI APPROVED badge bounding box
+    const overlappingChaiApprovedGroups = groups.filter(g =>
+      g.id !== chaiApprovedGroup!.id &&
+      g.bounds.x >= chaiApprovedGroup!.bounds.x - 10 &&
+      g.bounds.x + g.bounds.width <= chaiApprovedGroup!.bounds.x + chaiApprovedGroup!.bounds.width + 10 &&
+      g.bounds.y >= chaiApprovedGroup!.bounds.y - 10 &&
+      g.bounds.y + g.bounds.height <= chaiApprovedGroup!.bounds.y + chaiApprovedGroup!.bounds.height + 10
+    );
+    expect(overlappingChaiApprovedGroups).toHaveLength(0);
+
+    // 2. Verify Chai Break Department badge (Row 4, Col 4: x: 550..720, y: 630..780)
+    const chaiDeptGroup = groups.find(g =>
+      g.bounds.x >= 550 && g.bounds.x <= 620 &&
+      g.bounds.y >= 630 && g.bounds.y <= 670 &&
+      g.bounds.width >= 100 && g.bounds.height >= 100
+    );
+    expect(chaiDeptGroup).toBeDefined();
+
+    // Verify no duplicate/split groups inside the Chai Break Department badge bounding box
+    const overlappingChaiDeptGroups = groups.filter(g =>
+      g.id !== chaiDeptGroup!.id &&
+      g.bounds.x >= chaiDeptGroup!.bounds.x - 10 &&
+      g.bounds.x + g.bounds.width <= chaiDeptGroup!.bounds.x + chaiDeptGroup!.bounds.width + 10 &&
+      g.bounds.y >= chaiDeptGroup!.bounds.y - 10 &&
+      g.bounds.y + g.bounds.height <= chaiDeptGroup!.bounds.y + chaiDeptGroup!.bounds.height + 10
+    );
+    expect(overlappingChaiDeptGroups).toHaveLength(0);
+
+    // Verify sheet caption underneath (y ≈ 800) did NOT leak into the badge (height should be <= 140)
+    expect(chaiDeptGroup!.bounds.height).toBeLessThanOrEqual(140);
+
+    // 3. Export both badges to test-output and assert non-empty valid PNGs
+    for (const badge of [chaiApprovedGroup!, chaiDeptGroup!]) {
+      const { distField, patchBounds } = buildGroupDistanceField(badge, compMap, labelMap, width, height, 50);
+      const { croppedRgba, croppedWidth, croppedHeight } = compositeSticker(
+        badge, compMap, labelMap, alphaMask, rgba, width, height, distField, patchBounds, 20, 4
+      );
+
+      expect(croppedWidth).toBeGreaterThan(50);
+      expect(croppedHeight).toBeGreaterThan(50);
+
+      const pngBuffer = await sharp(Buffer.from(croppedRgba.buffer), {
+        raw: { width: croppedWidth, height: croppedHeight, channels: 4 }
+      }).png().toBuffer();
+
+      const outName = `chai_break_${badge.name}.png`;
+      fs.writeFileSync(path.join(OUTPUT_DIR, outName), pngBuffer);
+    }
+  });
 });
+

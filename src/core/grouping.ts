@@ -6,6 +6,7 @@
  */
 
 import { ArtworkComponent, BoundingBox, ConnectorBridge, StickerGroup } from '../types';
+import { detectEnclosures, isComponentNearPixels } from './enclosure';
 
 /**
  * Computes Manhattan/Euclidean distance between two bounding boxes.
@@ -49,7 +50,10 @@ export function unionBounds(bounds: BoundingBox[]): BoundingBox {
 export function proposeStickerGroups(
   components: ArtworkComponent[],
   proximityThreshold: number = 40,
-  detectTitles: boolean = true
+  detectTitles: boolean = true,
+  labelMap?: Uint16Array,
+  sheetWidth?: number,
+  sheetHeight?: number
 ): StickerGroup[] {
   if (components.length === 0) return [];
 
@@ -64,10 +68,32 @@ export function proposeStickerGroups(
 
   const assignedGroups: Array<Set<string>> = [];
   const assignedCompIds = new Set<string>();
+  const enclosureGroupIndices = new Set<number>();
+
+  // --- STEP 0: Enclosure & Badge Detection ---
+  // Outer rings, frames, badges, and seals group all structurally contained components
+  const enclosures = detectEnclosures(components, labelMap, sheetWidth, sheetHeight);
+  for (const [containerId, enclosedSet] of enclosures.entries()) {
+    if (assignedCompIds.has(containerId)) continue;
+
+    const group = new Set<string>([containerId]);
+    assignedCompIds.add(containerId);
+
+    for (const innerId of enclosedSet) {
+      if (!assignedCompIds.has(innerId)) {
+        group.add(innerId);
+        assignedCompIds.add(innerId);
+      }
+    }
+
+    const groupIdx = assignedGroups.length;
+    enclosureGroupIndices.add(groupIdx);
+    assignedGroups.push(group);
+  }
 
   // --- STEP 1: Title Banner Detection ---
   if (detectTitles) {
-    const titleCandidates = components.filter(isTitleCandidate);
+    const titleCandidates = components.filter(c => !assignedCompIds.has(c.id) && isTitleCandidate(c));
     // Find horizontally aligned letters with similar baseline and height
     const sortedByY = [...titleCandidates].sort((a, b) => a.bounds.y - b.bounds.y);
 
@@ -128,12 +154,27 @@ export function proposeStickerGroups(
     let bestGroup: Set<string> | null = null;
     let minDistance = Infinity;
 
-    for (const group of assignedGroups) {
+    for (let gIdx = 0; gIdx < assignedGroups.length; gIdx++) {
+      const group = assignedGroups[gIdx];
+      const isEnclosure = enclosureGroupIndices.has(gIdx);
+      // For enclosed badges, only attach satellites that are closely adjacent (e.g. leaves/sparkles <= 15px)
+      // and prevent external wide sheet captions (w >= 40, h <= 14) from attaching to badge
+      const allowedThreshold = isEnclosure ? Math.min(15, proximityThreshold * 0.45) : proximityThreshold;
+      const isCaption = small.bounds.width >= 40 && small.bounds.height <= 14;
+      if (isEnclosure && isCaption) continue;
+
       // Find closest component in this group
       for (const memberId of group) {
         const member = compMap.get(memberId)!;
         const dist = bboxDistance(small.bounds, member.bounds);
-        if (dist < minDistance) {
+        if (dist < minDistance && dist <= allowedThreshold) {
+          // If bboxDistance is 0 (disjoint bounding boxes overlap/contain each other),
+          // verify that actual pixels are within allowedThreshold rather than sitting in an open mouth/bite
+          if (dist === 0 && labelMap && sheetWidth && sheetHeight) {
+            if (!isComponentNearPixels(small, member, labelMap, sheetWidth, sheetHeight, allowedThreshold)) {
+              continue;
+            }
+          }
           minDistance = dist;
           bestGroup = group;
         }
@@ -141,7 +182,7 @@ export function proposeStickerGroups(
     }
 
     // Attach to nearest group if within proximity threshold
-    if (bestGroup && minDistance <= proximityThreshold) {
+    if (bestGroup) {
       bestGroup.add(small.id);
       assignedCompIds.add(small.id);
     } else {
@@ -152,6 +193,7 @@ export function proposeStickerGroups(
     }
   }
 
+
   // --- STEP 4: Build StickerGroup objects ---
   const groups: StickerGroup[] = assignedGroups.map((groupSet, idx) => {
     const compIds = Array.from(groupSet);
@@ -161,8 +203,10 @@ export function proposeStickerGroups(
     const name = `sticker_${String(idx + 1).padStart(3, '0')}`;
 
     // Auto-generate connector bridges for multi-part groups
+    // Suppress interior bridges for enclosed groups (outer container already connects the physical backing)
+    const isEnclosure = enclosureGroupIndices.has(idx);
     const bridges: ConnectorBridge[] = [];
-    if (compIds.length > 1) {
+    if (compIds.length > 1 && !isEnclosure) {
       for (let i = 0; i < compIds.length; i++) {
         const c1 = compMap.get(compIds[i])!;
         let nearestOther: ArtworkComponent | null = null;

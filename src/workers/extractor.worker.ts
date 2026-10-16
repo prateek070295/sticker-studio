@@ -80,7 +80,10 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       const suggestedGroups = proposeStickerGroups(
         components,
         settings.groupingProximityThreshold,
-        settings.enableTitleDetection
+        settings.enableTitleDetection,
+        labelMap,
+        width,
+        height
       );
 
       const holes = enclosedHoleCandidates.map((c, i) => ({
