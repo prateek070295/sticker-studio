@@ -71,8 +71,14 @@ export function usePWA() {
   // Activates the waiting worker, then reloads once it controls the page, so the reload
   // can never mix old HTML with new assets.
   const reloadApp = useCallback(() => {
-    if (updateSWRef.current) updateSWRef.current(true);
-    else window.location.reload();
+    if (updateSWRef.current) {
+      updateSWRef.current(true);
+      setTimeout(() => {
+        window.location.reload();
+      }, 300);
+    } else {
+      window.location.reload();
+    }
   }, []);
 
   return {

@@ -19,6 +19,7 @@ export default defineConfig({
         maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
         navigateFallback: 'index.html',
         cleanupOutdatedCaches: true,
+        clientsClaim: true,
       },
       manifest: {
         name: 'Sticker Studio — Sheet Extractor',
