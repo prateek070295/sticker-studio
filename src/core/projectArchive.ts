@@ -1,0 +1,367 @@
+/**
+ * Hardened Project Archive Engine (.stickerstudio).
+ * Handles transactional project serialization and deserialization with:
+ * - Schema versioning (schemaVersion: 1)
+ * - SHA-256 source image integrity verification
+ * - Archive size & decompression ratio enforcement (Zip Bomb defense)
+ * - Path traversal defense (rejection of ../ and absolute paths)
+ * - Referential integrity validation across groups and components
+ * - Safe transactional staging (active workspace untouched if load fails)
+ */
+
+import JSZip from 'jszip';
+import {
+  ArtworkComponent,
+  EnclosedHole,
+  ExtractionSettings,
+  MaskPatch,
+  ProjectMetadata,
+  SerializedProject,
+  StickerGroup
+} from '../types';
+import { createZip, ZipEntry } from './zip';
+
+export const CURRENT_SCHEMA_VERSION = 1;
+export const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024; // 100 MB max compressed archive
+export const MAX_UNCOMPRESSED_TOTAL_BYTES = 250 * 1024 * 1024; // 250 MB total uncompressed budget
+export const MAX_PER_ENTRY_BYTES = 150 * 1024 * 1024; // 150 MB per single entry
+export const MAX_DECOMPRESSION_RATIO = 100; // 100x maximum expansion ratio
+export const MAX_IMAGE_WIDTH = 16384;
+export const MAX_IMAGE_HEIGHT = 16384;
+export const MAX_IMAGE_PIXELS = 30_000_000;
+export const MAX_IMAGE_ALLOCATION_BYTES = 256 * 1024 * 1024; // 256 MB RGBA buffer budget
+
+export interface ProjectSaveState {
+  name: string;
+  sourceImage: ImageData;
+  settings: ExtractionSettings;
+  components: ArtworkComponent[];
+  groups: StickerGroup[];
+  holes: EnclosedHole[];
+  globalBorderThickness: number;
+  globalSolidBacking: boolean;
+  globalWhiteBacking: boolean;
+  patches?: MaskPatch[];
+}
+
+export interface LoadedProjectData {
+  metadata: ProjectMetadata;
+  sourceImage: ImageData;
+  components: ArtworkComponent[];
+  groups: StickerGroup[];
+  holes: EnclosedHole[];
+  patches?: MaskPatch[];
+}
+
+/**
+ * Computes a hexadecimal SHA-256 hash using native Web Cryptography API.
+ */
+export async function computeSha256(data: Uint8Array): Promise<string> {
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data as ArrayBufferView);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Polyfill ImageData for Node.js test environments if undefined
+if (typeof globalThis.ImageData === 'undefined') {
+  (globalThis as any).ImageData = class ImageData {
+    data: Uint8ClampedArray;
+    width: number;
+    height: number;
+    constructor(wOrData: any, hOrW?: any, h?: any) {
+      if (wOrData instanceof Uint8ClampedArray) {
+        this.data = wOrData;
+        this.width = hOrW;
+        this.height = h;
+      } else {
+        this.width = wOrData;
+        this.height = hOrW;
+        this.data = new Uint8ClampedArray(wOrData * hOrW * 4);
+      }
+    }
+  };
+}
+
+let nodeSharp: any = null;
+try {
+  // @ts-ignore
+  nodeSharp = require('c:/Users/prate/Documents/pheartp/node_modules/sharp');
+} catch {}
+
+/**
+ * Encodes an ImageData into a PNG Uint8Array.
+ */
+export async function imageDataToPngBytes(imageData: ImageData): Promise<Uint8Array> {
+  if (typeof document === 'undefined' && typeof OffscreenCanvas === 'undefined' && nodeSharp) {
+    const pngBuffer = await nodeSharp(Buffer.from(imageData.data.buffer), {
+      raw: { width: imageData.width, height: imageData.height, channels: 4 }
+    }).png().toBuffer();
+    return new Uint8Array(pngBuffer);
+  }
+
+  let canvas: HTMLCanvasElement | OffscreenCanvas;
+  if (typeof OffscreenCanvas !== 'undefined') {
+    canvas = new OffscreenCanvas(imageData.width, imageData.height);
+  } else {
+    canvas = document.createElement('canvas');
+    canvas.width = imageData.width;
+    canvas.height = imageData.height;
+  }
+
+  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+  ctx.putImageData(imageData, 0, 0);
+
+  if ('convertToBlob' in canvas) {
+    const blob = await (canvas as OffscreenCanvas).convertToBlob({ type: 'image/png' });
+    const buffer = await blob.arrayBuffer();
+    return new Uint8Array(buffer);
+  } else {
+    return new Promise((resolve, reject) => {
+      (canvas as HTMLCanvasElement).toBlob((blob) => {
+        if (!blob) {
+          reject(new Error('Failed to encode canvas to PNG'));
+          return;
+        }
+        blob.arrayBuffer().then((buf) => resolve(new Uint8Array(buf))).catch(reject);
+      }, 'image/png');
+    });
+  }
+}
+
+/**
+ * Decodes a PNG Uint8Array into an ImageData object.
+ */
+export async function pngBytesToImageData(pngBytes: Uint8Array): Promise<ImageData> {
+  if (typeof FileReader === 'undefined' && nodeSharp) {
+    const img = nodeSharp(Buffer.from(pngBytes.buffer, pngBytes.byteOffset, pngBytes.byteLength)).ensureAlpha();
+    const meta = await img.metadata();
+    const rawBuf = await img.raw().toBuffer();
+    const clamped = new Uint8ClampedArray(rawBuf.buffer, rawBuf.byteOffset, rawBuf.byteLength);
+    return new (globalThis as any).ImageData(clamped, meta.width!, meta.height!);
+  }
+
+  const blob = new Blob([pngBytes as BlobPart], { type: 'image/png' });
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let canvas: HTMLCanvasElement | OffscreenCanvas;
+      if (typeof OffscreenCanvas !== 'undefined') {
+        canvas = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
+      } else {
+        canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+      }
+      const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+      ctx.drawImage(img, 0, 0);
+      resolve(ctx.getImageData(0, 0, img.naturalWidth, img.naturalHeight));
+    };
+    img.onerror = () => reject(new Error('Corrupted or unreadable PNG image'));
+    img.src = dataUrl;
+  });
+}
+
+/**
+ * Serializes the complete project state into a secure .stickerstudio ZIP archive.
+ */
+export async function saveProjectArchive(state: ProjectSaveState): Promise<Blob> {
+  const pngBytes = await imageDataToPngBytes(state.sourceImage);
+  const sourceSha256 = await computeSha256(pngBytes);
+
+  const metadata: ProjectMetadata = {
+    version: '1.1',
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    name: state.name || 'Untitled Sticker Project',
+    sourceSha256,
+    imageDimensions: {
+      width: state.sourceImage.width,
+      height: state.sourceImage.height
+    },
+    settings: state.settings,
+    globalBorderThickness: state.globalBorderThickness,
+    globalSolidBacking: state.globalSolidBacking,
+    globalWhiteBacking: state.globalWhiteBacking
+  };
+
+  const serializedProject: SerializedProject = {
+    metadata,
+    components: state.components,
+    groups: state.groups,
+    holes: state.holes,
+    patches: state.patches ? state.patches.map(p => ({
+      id: p.id,
+      bounds: p.bounds,
+      mode: p.mode,
+      timestamp: p.timestamp
+    })) : []
+  };
+
+  const projectJsonBytes = new TextEncoder().encode(JSON.stringify(serializedProject, null, 2));
+
+  const entries: ZipEntry[] = [
+    { name: 'project.json', data: projectJsonBytes },
+    { name: 'source.png', data: pngBytes }
+  ];
+
+  return createZip(entries);
+}
+
+/**
+ * Loads, decompresses, and transactionally validates a .stickerstudio archive.
+ * Throws on corruption, invalid checksum, schema mismatch, or path traversal,
+ * ensuring the active workspace is never replaced with invalid state.
+ */
+export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<LoadedProjectData> {
+  if (fileOrBlob.size > MAX_ARCHIVE_BYTES) {
+    throw new Error(`Archive exceeds maximum allowable size (${Math.round(fileOrBlob.size / 1024 / 1024)}MB > ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB limit).`);
+  }
+
+  // Pre-scan raw bytes for path traversal before JSZip normalizes entry paths
+  const rawBytes = fileOrBlob instanceof Uint8Array ? fileOrBlob : new Uint8Array(await fileOrBlob.arrayBuffer());
+  const rawHeaderStr = new TextDecoder('utf-8', { fatal: false }).decode(rawBytes);
+  if (rawHeaderStr.includes('../') || rawHeaderStr.includes('..\\')) {
+    throw new Error('Security violation: Archive contains illegal path traversal entry.');
+  }
+
+  const zip = new JSZip();
+  let uncompressedTotalBytes = 0;
+
+  let loadedZip: JSZip;
+  try {
+    loadedZip = await zip.loadAsync(fileOrBlob);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Corrupted or invalid ZIP container: ${message}`);
+  }
+
+  // 1. Path traversal and entry integrity check
+  for (const relativePath of Object.keys(loadedZip.files)) {
+    if (relativePath.includes('..') || relativePath.startsWith('/') || relativePath.startsWith('\\')) {
+      throw new Error(`Security violation: Archive contains illegal path traversal entry "${relativePath}".`);
+    }
+  }
+
+  // 2. Validate project.json presence and entry size budget
+  const projectFile = loadedZip.file('project.json');
+  if (!projectFile) {
+    throw new Error('Invalid .stickerstudio archive: missing project.json definition.');
+  }
+
+  const projectJsonBytes = await projectFile.async('uint8array');
+  if (projectJsonBytes.length > MAX_PER_ENTRY_BYTES) {
+    throw new Error(`Per-entry size budget exceeded: project.json size (${Math.round(projectJsonBytes.length / 1024 / 1024)}MB) exceeds ${MAX_PER_ENTRY_BYTES / 1024 / 1024}MB limit.`);
+  }
+  uncompressedTotalBytes += projectJsonBytes.length;
+
+  const projectJsonStr = new TextDecoder().decode(projectJsonBytes);
+  let serialized: SerializedProject;
+  try {
+    serialized = JSON.parse(projectJsonStr);
+  } catch {
+    throw new Error('Corrupted project.json: invalid JSON syntax.');
+  }
+
+  // 3. Schema version verification
+  if (!serialized.metadata || serialized.metadata.schemaVersion !== CURRENT_SCHEMA_VERSION) {
+    throw new Error(`Incompatible project schema version: expected ${CURRENT_SCHEMA_VERSION}, received ${serialized.metadata?.schemaVersion}.`);
+  }
+
+  // 4. Image dimension & allocation safety checks
+  const { width: metaW, height: metaH } = serialized.metadata.imageDimensions || { width: 0, height: 0 };
+  if (metaW <= 0 || metaW > MAX_IMAGE_WIDTH || metaH <= 0 || metaH > MAX_IMAGE_HEIGHT) {
+    throw new Error(`Invalid image dimensions (${metaW}x${metaH}): dimensions must be between 1 and ${MAX_IMAGE_WIDTH}px.`);
+  }
+
+  const pixelCount = metaW * metaH;
+  if (pixelCount > MAX_IMAGE_PIXELS) {
+    throw new Error(`Pixel budget exceeded: image contains ${pixelCount} pixels (maximum allowable: ${MAX_IMAGE_PIXELS}).`);
+  }
+
+  const requiredAllocationBytes = pixelCount * 4;
+  if (requiredAllocationBytes > MAX_IMAGE_ALLOCATION_BYTES) {
+    throw new Error(`Allocation budget exceeded: required buffer (${Math.round(requiredAllocationBytes / 1024 / 1024)}MB) exceeds ${MAX_IMAGE_ALLOCATION_BYTES / 1024 / 1024}MB limit.`);
+  }
+
+  // 5. Referential Integrity Validation (validate object graph before expensive image decoding)
+  const compIdSet = new Set<string>();
+  for (const comp of serialized.components || []) {
+    if (!comp.id || typeof comp.label !== 'number' || comp.label <= 0) {
+      throw new Error(`Invalid component metadata: Component "${comp?.id}" has an invalid label or identifier.`);
+    }
+    compIdSet.add(comp.id);
+  }
+
+  const claimedCompIds = new Set<string>();
+  for (const group of serialized.groups || []) {
+    if (!group.id || !group.componentIds || group.componentIds.length === 0) {
+      throw new Error(`Invalid group metadata: Group "${group?.id}" is missing valid component assignments.`);
+    }
+    for (const cId of group.componentIds) {
+      if (!compIdSet.has(cId)) {
+        throw new Error(`Referential integrity error: Group "${group.id}" references non-existent component "${cId}".`);
+      }
+      if (claimedCompIds.has(cId)) {
+        throw new Error(`Ownership violation: Component "${cId}" is assigned to multiple sticker groups.`);
+      }
+      claimedCompIds.add(cId);
+    }
+  }
+
+  // 6. Validate source.png presence, per-entry size, and cumulative decompression budget
+  const sourceFile = loadedZip.file('source.png');
+  if (!sourceFile) {
+    throw new Error('Invalid .stickerstudio archive: missing source.png image asset.');
+  }
+
+  const sourceBytes = await sourceFile.async('uint8array');
+  if (sourceBytes.length > MAX_PER_ENTRY_BYTES) {
+    throw new Error(`Per-entry size budget exceeded: source.png (${Math.round(sourceBytes.length / 1024 / 1024)}MB) exceeds ${MAX_PER_ENTRY_BYTES / 1024 / 1024}MB limit.`);
+  }
+  uncompressedTotalBytes += sourceBytes.length;
+
+  if (uncompressedTotalBytes > MAX_UNCOMPRESSED_TOTAL_BYTES) {
+    throw new Error(`Cumulative decompression budget exceeded: Total uncompressed data (${Math.round(uncompressedTotalBytes / 1024 / 1024)}MB) exceeds ${MAX_UNCOMPRESSED_TOTAL_BYTES / 1024 / 1024}MB limit.`);
+  }
+
+  // Check decompression ratio (zip bomb defense)
+  if (fileOrBlob.size > 1024) {
+    const ratio = uncompressedTotalBytes / fileOrBlob.size;
+    if (ratio > MAX_DECOMPRESSION_RATIO) {
+      throw new Error(`Decompression ratio violation: Archive expansion ratio (${ratio.toFixed(1)}x) exceeds allowable ${MAX_DECOMPRESSION_RATIO}x threshold (Zip Bomb defense).`);
+    }
+  }
+
+  // 7. Source image SHA-256 integrity verification
+  const calculatedSha256 = await computeSha256(sourceBytes);
+  if (serialized.metadata.sourceSha256 && calculatedSha256 !== serialized.metadata.sourceSha256) {
+    throw new Error(`Integrity check failed: source.png SHA-256 checksum mismatch (expected ${serialized.metadata.sourceSha256}, got ${calculatedSha256}).`);
+  }
+
+  // 8. Decode source image
+  const sourceImage = await pngBytesToImageData(sourceBytes);
+
+  if (
+    sourceImage.width !== serialized.metadata.imageDimensions.width ||
+    sourceImage.height !== serialized.metadata.imageDimensions.height
+  ) {
+    throw new Error(`Dimension mismatch: Image dimensions (${sourceImage.width}x${sourceImage.height}) do not match project metadata (${serialized.metadata.imageDimensions.width}x${serialized.metadata.imageDimensions.height}).`);
+  }
+
+  // Transactionally validated and ready for hydration
+  return {
+    metadata: serialized.metadata,
+    sourceImage,
+    components: serialized.components || [],
+    groups: serialized.groups || [],
+    holes: serialized.holes || []
+  };
+}

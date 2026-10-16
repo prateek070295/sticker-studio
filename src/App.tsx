@@ -8,6 +8,12 @@ import { ControlsPanel } from './components/ControlsPanel';
 import { usePWA } from './pwa/usePWA';
 import { InstallModal } from './components/InstallModal';
 
+const AdvancedEditorModal = React.lazy(() =>
+  import('./components/editor/AdvancedEditorModal').then(module => ({
+    default: module.AdvancedEditorModal
+  }))
+);
+
 const SAMPLE_SHEETS = [
   {
     id: 'momos_bakery',
@@ -61,6 +67,9 @@ export default function App() {
     groupDistanceFieldsRef,
     canUndo,
     canRedo,
+    activeEditGroupId,
+    setActiveEditGroupId,
+    estimatedBgColor,
     setViewMode,
     setToolMode,
     setPreviewBg,
@@ -80,7 +89,12 @@ export default function App() {
     undo,
     redo,
     exportSingleSticker,
-    exportAllZip
+    exportAllZip,
+    applyBrushPatch,
+    splitTouchingComponent,
+    updateBackingOverride,
+    saveProject,
+    loadProject
   } = useProjectState();
 
   const {
@@ -186,6 +200,8 @@ export default function App() {
         onInstallClick={triggerInstall}
         isOfflineReady={isOfflineReady}
         needRefresh={needRefresh}
+        onSaveProject={saveProject}
+        onLoadProject={loadProject}
         onRefreshClick={() => {
           if (isProcessing || exportProgress) {
             alert('Please wait for the current extraction or export to finish, then click Update again.');
@@ -218,6 +234,7 @@ export default function App() {
                 onMergeSelectedGroups={mergeSelectedGroups}
                 onSplitSelectedGroup={splitSelectedGroup}
                 onToggleGroupExcluded={toggleGroupExcluded}
+                onEditGroup={setActiveEditGroupId}
               />
             ) : (
               <StickerGridView
@@ -235,6 +252,7 @@ export default function App() {
                 onExportSingle={exportSingleSticker}
                 onSelectGroup={selectGroup}
                 selectedGroupIds={selectedGroupIds}
+                onEditGroup={setActiveEditGroupId}
               />
             )}
 
@@ -396,6 +414,44 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {/* Advanced Extraction Editor Modal */}
+        {activeEditGroupId && (() => {
+          const activeGroup = groups.find(g => g.id === activeEditGroupId);
+          if (!activeGroup || !sourceImage || !labelMap || !alphaMask) return null;
+          return (
+            <React.Suspense
+              fallback={
+                <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center text-white font-semibold">
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="w-5 h-5 animate-spin text-pink-500" />
+                    <span>Opening Advanced Editor...</span>
+                  </div>
+                </div>
+              }
+            >
+              <AdvancedEditorModal
+                group={activeGroup}
+                components={components}
+                groups={groups}
+                sourceImage={sourceImage}
+                labelMap={labelMap}
+                alphaMask={alphaMask}
+                sheetWidth={sheetDimensions.width}
+                sheetHeight={sheetDimensions.height}
+                estimatedBgColor={estimatedBgColor}
+                canUndo={canUndo}
+                canRedo={canRedo}
+                onUndo={undo}
+                onRedo={redo}
+                onApplyBrushPatch={applyBrushPatch}
+                onSplitTouchingComponent={splitTouchingComponent}
+                onUpdateBackingOverride={updateBackingOverride}
+                onClose={() => setActiveEditGroupId(null)}
+              />
+            </React.Suspense>
+          );
+        })()}
       </main>
 
       {/* Educational Installation Modal */}

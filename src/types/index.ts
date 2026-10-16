@@ -39,6 +39,7 @@ export interface StickerGroup {
   solidBacking: boolean; // If true, closes internal holes in die-cut backing
   bridges: ConnectorBridge[];
   excludedFromExport: boolean;
+  backingOverride?: BackingOverride;
 }
 
 export interface EnclosedHole {
@@ -58,7 +59,126 @@ export interface ExtractionSettings {
 }
 
 export type ViewMode = 'sheet' | 'grid';
-export type ToolMode = 'select' | 'lasso' | 'remove-hole' | 'keep-brush' | 'erase-brush';
+export type ToolMode =
+  | 'select'
+  | 'lasso'
+  | 'remove-hole'
+  | 'keep-brush'
+  | 'erase-brush'
+  | 'restore-brush'
+  | 'smart-erase'
+  | 'split'
+  | 'fg-guide'
+  | 'bg-guide'
+  | 'add-backing'
+  | 'remove-backing'
+  | 'smooth-backing'
+  | 'pan';
+
+export interface StrokePoint {
+  x: number;
+  y: number;
+  pressure?: number;
+}
+
+export interface MaskPatch {
+  id: string;
+  bounds: BoundingBox;
+  beforeAlpha: Uint8Array; // original values in bounds
+  afterAlpha: Uint8Array;  // modified values in bounds
+  mode: 'restore' | 'erase';
+  timestamp: number;
+}
+
+export interface GuidedStroke {
+  id: string;
+  points: StrokePoint[];
+  type: 'foreground' | 'background' | 'split-cut';
+  radius: number;
+}
+
+export interface TouchingSplitRequest {
+  componentId: string;
+  mode: 'cut-line' | 'seeds';
+  cutLine?: { x1: number; y1: number; x2: number; y2: number };
+  seedA?: { x: number; y: number };
+  seedB?: { x: number; y: number };
+}
+
+export interface SplitResult {
+  originalComponentId: string;
+  newComponentA: ArtworkComponent;
+  newComponentB: ArtworkComponent;
+  affectedBounds: BoundingBox;
+}
+
+export interface BackingOverride {
+  groupId: string;
+  addedMask?: Uint8Array; // 0 or 1 in patchBounds
+  removedMask?: Uint8Array;
+  bounds?: BoundingBox;
+  smoothingRadius?: number; // 0 to 10
+}
+
+export interface EdgeWarning {
+  id: string;
+  type: 'color-halo' | 'isolated-island' | 'thin-bridge' | 'clipped-border';
+  severity: 'warning' | 'error' | 'info';
+  message: string;
+  location?: { x: number; y: number; width?: number; height?: number };
+  autoFixable: boolean;
+  groupId?: string;
+  componentId?: string;
+}
+
+export interface EdgeInspectorConfig {
+  colorHaloTolerance: number;      // delta-E / RGB Euclidean distance threshold (default 25)
+  minBridgeWidthPx: number;         // default 8px at screen resolution
+  printDpi?: number;                // e.g. 300 DPI for physical print
+  minPhysicalBridgeMm?: number;     // e.g. 1.0mm minimum physical die-cut width
+  detectIsolatedIslands: boolean;   // detect detached backing islands
+  detectBorderClipping: boolean;    // detect margin collisions
+}
+
+export interface SplitPreview {
+  componentId: string;
+  bounds: BoundingBox;
+  partitionA: Uint8Array; // 1 if assigned to A, 0 otherwise, size bounds.width * bounds.height
+  partitionB: Uint8Array; // 1 if assigned to B, 0 otherwise
+  countA: number;
+  countB: number;
+}
+
+export interface ProjectMetadata {
+  version: '1.1';
+  schemaVersion: 1;
+  createdAt: number;
+  updatedAt: number;
+  name: string;
+  sourceSha256: string;
+  imageDimensions: { width: number; height: number };
+  settings: ExtractionSettings;
+  globalBorderThickness: number;
+  globalSolidBacking: boolean;
+  globalWhiteBacking: boolean;
+}
+
+export interface SerializedProject {
+  metadata: ProjectMetadata;
+  components: ArtworkComponent[];
+  groups: StickerGroup[];
+  holes: EnclosedHole[];
+  patches?: Array<{
+    id: string;
+    bounds: BoundingBox;
+    mode: 'restore' | 'erase';
+    timestamp: number;
+  }>;
+  backingOverrides?: Record<string, {
+    smoothingRadius?: number;
+    bounds?: BoundingBox;
+  }>;
+}
 
 export interface ExtractorProgress {
   stage: 'estimating' | 'segmenting' | 'components' | 'grouping' | 'edt' | 'complete';

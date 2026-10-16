@@ -11,16 +11,29 @@ import {
   StickerGroup,
   ToolMode,
   ViewMode,
-  WorkerResponse
+  WorkerResponse,
+  MaskPatch,
+  TouchingSplitRequest,
+  BackingOverride
 } from '../types';
 import { buildGroupDistanceField, compositeSticker } from '../core/composer';
 import { createZip } from '../core/zip';
 import { loadUserPreferences, saveUserPreferences } from './preferences';
+import { applyBrushPatchWithOwnership, OwnershipDiff, revertBrushPatchWithOwnership } from '../core/maskPatch';
+import { commitTouchingSplit, previewTouchingSplit } from '../core/watershedSplit';
+import { loadProjectArchive, saveProjectArchive } from '../core/projectArchive';
 
 interface HistorySnapshot {
   groups: StickerGroup[];
   holes: EnclosedHole[];
+  components: ArtworkComponent[];
   globalBorderThickness: number;
+  diff?: OwnershipDiff;
+  splitDiff?: {
+    bounds: { x: number; y: number; width: number; height: number };
+    beforeLabels: Uint16Array;
+    afterLabels: Uint16Array;
+  };
 }
 
 export function useProjectState() {
@@ -38,6 +51,9 @@ export function useProjectState() {
   const [components, setComponents] = useState<ArtworkComponent[]>([]);
   const [groups, setGroups] = useState<StickerGroup[]>([]);
   const [holes, setHoles] = useState<EnclosedHole[]>([]);
+
+  // Active group being edited in Advanced Editor Modal
+  const [activeEditGroupId, setActiveEditGroupId] = useState<string | null>(null);
 
   // Cached group distance fields (Map: groupId -> Float32Array)
   const groupDistanceFieldsRef = useRef<Map<string, { distField: Float32Array; bounds: { x: number; y: number; width: number; height: number } }>>(new Map());
@@ -64,7 +80,7 @@ export function useProjectState() {
     enableTitleDetection: true
   });
 
-  // Undo / Redo stacks
+  // Undo / Redo stacks with full structural transactions
   const historyRef = useRef<HistorySnapshot[]>([]);
   const futureRef = useRef<HistorySnapshot[]>([]);
 
@@ -72,12 +88,13 @@ export function useProjectState() {
     historyRef.current.push({
       groups: JSON.parse(JSON.stringify(groups)),
       holes: JSON.parse(JSON.stringify(holes)),
+      components: JSON.parse(JSON.stringify(components)),
       globalBorderThickness
     });
     // Cap history length at 30
     if (historyRef.current.length > 30) historyRef.current.shift();
     futureRef.current = [];
-  }, [groups, holes, globalBorderThickness]);
+  }, [groups, holes, components, globalBorderThickness]);
 
   const undo = useCallback(() => {
     if (historyRef.current.length === 0) return;
@@ -85,12 +102,34 @@ export function useProjectState() {
     futureRef.current.push({
       groups: JSON.parse(JSON.stringify(groups)),
       holes: JSON.parse(JSON.stringify(holes)),
-      globalBorderThickness
+      components: JSON.parse(JSON.stringify(components)),
+      globalBorderThickness,
+      diff: prev.diff,
+      splitDiff: prev.splitDiff
     });
+
+    if (prev.diff && alphaMask && labelMap) {
+      revertBrushPatchWithOwnership(alphaMask, labelMap, sheetDimensions.width, prev.diff);
+      for (const gId of prev.diff.affectedGroupIds) {
+        groupDistanceFieldsRef.current.delete(gId);
+      }
+    }
+
+    if (prev.splitDiff && labelMap) {
+      const { x, y, width, height } = prev.splitDiff.bounds;
+      for (let r = 0; r < height; r++) {
+        const srcRow = r * width;
+        const dstRow = (y + r) * sheetDimensions.width + x;
+        labelMap.set(prev.splitDiff.beforeLabels.subarray(srcRow, srcRow + width), dstRow);
+      }
+      groupDistanceFieldsRef.current.clear();
+    }
+
     setGroups(prev.groups);
     setHoles(prev.holes);
+    setComponents(prev.components);
     setGlobalBorderThickness(prev.globalBorderThickness);
-  }, [groups, holes, globalBorderThickness]);
+  }, [groups, holes, components, globalBorderThickness, alphaMask, labelMap, sheetDimensions.width]);
 
   const redo = useCallback(() => {
     if (futureRef.current.length === 0) return;
@@ -98,12 +137,40 @@ export function useProjectState() {
     historyRef.current.push({
       groups: JSON.parse(JSON.stringify(groups)),
       holes: JSON.parse(JSON.stringify(holes)),
-      globalBorderThickness
+      components: JSON.parse(JSON.stringify(components)),
+      globalBorderThickness,
+      diff: next.diff,
+      splitDiff: next.splitDiff
     });
+
+    if (next.diff && alphaMask && labelMap) {
+      const { x, y, width, height } = next.diff.patch.bounds;
+      for (let r = 0; r < height; r++) {
+        const srcRow = r * width;
+        const dstRow = (y + r) * sheetDimensions.width + x;
+        alphaMask.set(next.diff.patch.afterAlpha.subarray(srcRow, srcRow + width), dstRow);
+        labelMap.set(next.diff.afterLabels.subarray(srcRow, srcRow + width), dstRow);
+      }
+      for (const gId of next.diff.affectedGroupIds) {
+        groupDistanceFieldsRef.current.delete(gId);
+      }
+    }
+
+    if (next.splitDiff && labelMap) {
+      const { x, y, width, height } = next.splitDiff.bounds;
+      for (let r = 0; r < height; r++) {
+        const srcRow = r * width;
+        const dstRow = (y + r) * sheetDimensions.width + x;
+        labelMap.set(next.splitDiff.afterLabels.subarray(srcRow, srcRow + width), dstRow);
+      }
+      groupDistanceFieldsRef.current.clear();
+    }
+
     setGroups(next.groups);
     setHoles(next.holes);
+    setComponents(next.components);
     setGlobalBorderThickness(next.globalBorderThickness);
-  }, [groups, holes, globalBorderThickness]);
+  }, [groups, holes, components, globalBorderThickness, alphaMask, labelMap, sheetDimensions.width]);
 
   // Worker instance
   const workerRef = useRef<Worker | null>(null);
@@ -429,7 +496,7 @@ export function useProjectState() {
         labelMap,
         sheetDimensions.width,
         sheetDimensions.height,
-        60
+        Math.max(64, Math.ceil(group.borderThickness) + 12)
       );
       cached = { distField: built.distField, bounds: built.patchBounds };
       groupDistanceFieldsRef.current.set(groupId, cached);
@@ -511,7 +578,7 @@ export function useProjectState() {
           labelMap,
           sheetDimensions.width,
           sheetDimensions.height,
-          60
+          Math.max(64, Math.ceil(group.borderThickness) + 12)
         );
         cached = { distField: built.distField, bounds: built.patchBounds };
         groupDistanceFieldsRef.current.set(group.id, cached);
@@ -599,6 +666,223 @@ export function useProjectState() {
     setExportProgress(null);
   }, [sourceImage, labelMap, alphaMask, groups, components, sheetDimensions, fileName]);
 
+  // V1.1 Advanced Actions
+  const applyBrushPatch = useCallback((patch: MaskPatch, targetGroupId?: string) => {
+    if (!alphaMask || !labelMap) return;
+    const diff = applyBrushPatchWithOwnership(
+      alphaMask,
+      labelMap,
+      components,
+      groups,
+      sheetDimensions.width,
+      sheetDimensions.height,
+      patch,
+      targetGroupId
+    );
+
+    historyRef.current.push({
+      groups: JSON.parse(JSON.stringify(groups)),
+      holes: JSON.parse(JSON.stringify(holes)),
+      components: JSON.parse(JSON.stringify(components)),
+      globalBorderThickness,
+      diff
+    });
+    if (historyRef.current.length > 30) historyRef.current.shift();
+    futureRef.current = [];
+
+    setComponents(diff.updatedComponents);
+    setGroups(diff.updatedGroups);
+
+    for (const gId of diff.affectedGroupIds) {
+      groupDistanceFieldsRef.current.delete(gId);
+    }
+  }, [alphaMask, labelMap, components, groups, sheetDimensions, holes, globalBorderThickness]);
+
+  const splitTouchingComponent = useCallback((compId: string, request: TouchingSplitRequest) => {
+    if (!sourceImage || !labelMap || !alphaMask) return false;
+    const comp = components.find(c => c.id === compId);
+    if (!comp) return false;
+
+    const preview = previewTouchingSplit(
+      comp,
+      sourceImage.data,
+      alphaMask,
+      labelMap,
+      sheetDimensions.width,
+      request
+    );
+    if (!preview) return false;
+
+    const { x, y, width, height } = preview.bounds;
+    const size = width * height;
+    const beforeLabels = new Uint16Array(size);
+    for (let r = 0; r < height; r++) {
+      const src = (y + r) * sheetDimensions.width + x;
+      const dst = r * width;
+      beforeLabels.set(labelMap.subarray(src, src + width), dst);
+    }
+
+    const compsClone = [...components];
+    const groupsClone = [...groups];
+
+    commitTouchingSplit(
+      comp,
+      preview,
+      labelMap,
+      compsClone,
+      groupsClone,
+      sheetDimensions.width
+    );
+
+    const afterLabels = new Uint16Array(size);
+    for (let r = 0; r < height; r++) {
+      const src = (y + r) * sheetDimensions.width + x;
+      const dst = r * width;
+      afterLabels.set(labelMap.subarray(src, src + width), dst);
+    }
+
+    historyRef.current.push({
+      groups: JSON.parse(JSON.stringify(groups)),
+      holes: JSON.parse(JSON.stringify(holes)),
+      components: JSON.parse(JSON.stringify(components)),
+      globalBorderThickness,
+      splitDiff: {
+        bounds: preview.bounds,
+        beforeLabels,
+        afterLabels
+      }
+    });
+    if (historyRef.current.length > 30) historyRef.current.shift();
+    futureRef.current = [];
+
+    groupDistanceFieldsRef.current.clear();
+    setComponents(compsClone);
+    setGroups(groupsClone);
+    return true;
+  }, [sourceImage, labelMap, alphaMask, components, groups, sheetDimensions, holes, globalBorderThickness]);
+
+  const updateBackingOverride = useCallback((groupId: string, override: BackingOverride) => {
+    pushHistory();
+    groupDistanceFieldsRef.current.delete(groupId);
+    setGroups(prev => prev.map(g => {
+      if (g.id === groupId) {
+        return { ...g, backingOverride: override };
+      }
+      return g;
+    }));
+  }, [pushHistory]);
+
+  const confirmRemoveHole = useCallback((holeId: string) => {
+    const hole = holes.find(h => h.id === holeId);
+    if (!hole || !alphaMask || !labelMap) return;
+    pushHistory();
+
+    const { x, y, width, height } = hole.bounds;
+    for (let r = 0; r < height; r++) {
+      const rowOffset = (y + r) * sheetDimensions.width;
+      for (let c = 0; c < width; c++) {
+        const idx = rowOffset + (x + c);
+        alphaMask[idx] = 0;
+        labelMap[idx] = 0;
+      }
+    }
+
+    setHoles(prev => prev.map(h => h.id === holeId ? { ...h, removedFromArtwork: true } : h));
+    const parentGroup = groups.find(g => g.componentIds.includes(hole.componentId));
+    if (parentGroup) groupDistanceFieldsRef.current.delete(parentGroup.id);
+  }, [holes, alphaMask, labelMap, sheetDimensions, pushHistory, groups]);
+
+  const keepHole = useCallback((holeId: string) => {
+    setHoles(prev => prev.map(h => h.id === holeId ? { ...h, removedFromArtwork: false } : h));
+  }, []);
+
+  const saveProject = useCallback(async () => {
+    if (!sourceImage) return;
+    const blob = await saveProjectArchive({
+      name: fileName ? fileName.replace(/\.[^/.]+$/, '') : 'Sticker_Project',
+      sourceImage,
+      settings,
+      components,
+      groups,
+      holes,
+      globalBorderThickness,
+      globalSolidBacking: true,
+      globalWhiteBacking: true
+    });
+
+    const baseName = fileName ? fileName.replace(/\.[^/.]+$/, '') : 'project';
+    if (window.desktopAPI) {
+      const filePath = await window.desktopAPI.saveFileDialog({
+        title: 'Save Sticker Studio Project',
+        defaultPath: `${baseName}.stickerstudio`,
+        filters: [{ name: 'Sticker Studio Project', extensions: ['stickerstudio', 'zip'] }]
+      });
+      if (filePath) {
+        const buffer = new Uint8Array(await blob.arrayBuffer());
+        await window.desktopAPI.writeFile(filePath, buffer);
+      }
+    } else {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${baseName}.stickerstudio`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  }, [sourceImage, fileName, settings, components, groups, holes, globalBorderThickness]);
+
+  const loadProject = useCallback(async (file: File | Blob) => {
+    setIsProcessing(true);
+    setProgress({ stage: 'components', percentage: 20, message: 'Validating & unpacking project archive...' });
+    try {
+      const loaded = await loadProjectArchive(file);
+      setFileName(loaded.metadata.name);
+      setSheetDimensions(loaded.metadata.imageDimensions);
+      setSourceImage(loaded.sourceImage);
+      setSettings(loaded.metadata.settings);
+      setGlobalBorderThickness(loaded.metadata.globalBorderThickness);
+      setComponents(loaded.components);
+      setGroups(loaded.groups);
+      setHoles(loaded.holes);
+
+      const width = loaded.metadata.imageDimensions.width;
+      const height = loaded.metadata.imageDimensions.height;
+      const size = width * height;
+      const newLabels = new Uint16Array(size);
+      const newAlpha = new Uint8Array(size);
+
+      for (let i = 0; i < size; i++) {
+        newAlpha[i] = loaded.sourceImage.data[i * 4 + 3];
+      }
+
+      for (const comp of loaded.components) {
+        const { x, y, width: cw, height: ch } = comp.bounds;
+        for (let ly = 0; ly < ch; ly++) {
+          for (let lx = 0; lx < cw; lx++) {
+            const idx = (y + ly) * width + (x + lx);
+            if (newAlpha[idx] > 0 && newLabels[idx] === 0) {
+              newLabels[idx] = comp.label;
+            }
+          }
+        }
+      }
+
+      setLabelMap(newLabels);
+      setAlphaMask(newAlpha);
+      groupDistanceFieldsRef.current.clear();
+      historyRef.current = [];
+      futureRef.current = [];
+      setIsProcessing(false);
+      setProgress(null);
+    } catch (err: unknown) {
+      setIsProcessing(false);
+      setProgress(null);
+      const message = err instanceof Error ? err.message : String(err);
+      alert(`Failed to load project: ${message}`);
+      throw err;
+    }
+  }, []);
+
   return {
     sourceImage,
     fileName,
@@ -609,6 +893,7 @@ export function useProjectState() {
     components,
     groups,
     holes,
+    activeEditGroupId,
     viewMode,
     toolMode,
     previewBg,
@@ -624,6 +909,7 @@ export function useProjectState() {
     canRedo: futureRef.current.length > 0,
 
     // Setters & Actions
+    setActiveEditGroupId,
     setViewMode,
     setToolMode,
     setPreviewBg,
@@ -644,6 +930,15 @@ export function useProjectState() {
     undo,
     redo,
     exportSingleSticker,
-    exportAllZip
+    exportAllZip,
+
+    // V1.1 Actions
+    applyBrushPatch,
+    splitTouchingComponent,
+    updateBackingOverride,
+    confirmRemoveHole,
+    keepHole,
+    saveProject,
+    loadProject
   };
 }

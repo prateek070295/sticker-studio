@@ -16,7 +16,59 @@ export interface ComposedSticker {
 }
 
 /**
+ * Applies a separable morphological filter to smooth jagged raster steps along silhouette contours.
+ */
+function applyContourSmoothing(mask: Uint8Array, width: number, height: number, radius: number): Uint8Array {
+  if (radius <= 0) return mask;
+  const temp = new Float32Array(width * height);
+  const out = new Uint8Array(width * height);
+  const r = Math.min(10, Math.round(radius));
+
+  // Horizontal blur pass
+  for (let y = 0; y < height; y++) {
+    const rowOffset = y * width;
+    let sum = 0;
+    for (let x = 0; x < width; x++) {
+      if (x === 0) {
+        for (let k = -r; k <= r; k++) {
+          const px = Math.max(0, Math.min(width - 1, k));
+          sum += mask[rowOffset + px];
+        }
+      } else {
+        const drop = Math.max(0, x - r - 1);
+        const add = Math.min(width - 1, x + r);
+        sum += mask[rowOffset + add] - mask[rowOffset + drop];
+      }
+      temp[rowOffset + x] = sum / (2 * r + 1);
+    }
+  }
+
+  // Vertical blur pass & thresholding at 0.5
+  for (let x = 0; x < width; x++) {
+    let sum = 0;
+    for (let y = 0; y < height; y++) {
+      if (y === 0) {
+        for (let k = -r; k <= r; k++) {
+          const py = Math.max(0, Math.min(height - 1, k));
+          sum += temp[py * width + x];
+        }
+      } else {
+        const drop = Math.max(0, y - r - 1);
+        const add = Math.min(height - 1, y + r);
+        sum += temp[add * width + x] - temp[drop * width + x];
+      }
+      const val = sum / (2 * r + 1);
+      out[y * width + x] = val >= 0.5 ? 1 : 0;
+    }
+  }
+
+  return out;
+}
+
+/**
  * Builds the group-isolated binary seed mask and full-res distance field.
+ * Follows the strict backing geometry pipeline:
+ * Base Seed -> Manual Add/Remove Edits -> Bridges -> Contour Smoothing -> Linear EDT.
  * Padded by margin to prevent border clipping.
  */
 export function buildGroupDistanceField(
@@ -33,10 +85,10 @@ export function buildGroupDistanceField(
   localHeight: number;
 } {
   const gb = group.bounds;
-  const minX = Math.max(0, gb.x - padding);
-  const minY = Math.max(0, gb.y - padding);
-  const maxX = Math.min(sheetWidth, gb.x + gb.width + padding);
-  const maxY = Math.min(sheetHeight, gb.y + gb.height + padding);
+  const minX = gb.x - padding;
+  const minY = gb.y - padding;
+  const maxX = gb.x + gb.width + padding;
+  const maxY = gb.y + gb.height + padding;
 
   const localWidth = maxX - minX;
   const localHeight = maxY - minY;
@@ -49,31 +101,60 @@ export function buildGroupDistanceField(
     if (comp) ownedLabels.add(comp.label);
   }
 
-  // Group-specific binary mask (1 for owned artwork, 0 for everything else)
-  const binarySeed = new Uint8Array(localSize);
+  // 1. Base seed mask
+  let binarySeed = new Uint8Array(localSize);
 
   for (let ly = 0; ly < localHeight; ly++) {
     const sy = minY + ly;
-    const sheetRowOffset = sy * sheetWidth;
     const localRowOffset = ly * localWidth;
 
-    for (let lx = 0; lx < localWidth; lx++) {
-      const sx = minX + lx;
-      const label = labelMap[sheetRowOffset + sx];
-      if (ownedLabels.has(label)) {
-        binarySeed[localRowOffset + lx] = 1;
+    if (sy >= 0 && sy < sheetHeight) {
+      const sheetRowOffset = sy * sheetWidth;
+      for (let lx = 0; lx < localWidth; lx++) {
+        const sx = minX + lx;
+        if (sx >= 0 && sx < sheetWidth) {
+          const label = labelMap[sheetRowOffset + sx];
+          if (ownedLabels.has(label)) {
+            binarySeed[localRowOffset + lx] = 1;
+          }
+        }
       }
     }
   }
 
-  // Include approved connector bridges if connectBacking is enabled
+  // 2. Apply manual backing overrides (additions and subtractions)
+  if (group.backingOverride) {
+    const { addedMask, removedMask } = group.backingOverride;
+    if (addedMask && addedMask.length === localSize) {
+      for (let i = 0; i < localSize; i++) {
+        if (addedMask[i] === 1) binarySeed[i] = 1;
+      }
+    }
+    if (removedMask && removedMask.length === localSize) {
+      for (let i = 0; i < localSize; i++) {
+        if (removedMask[i] === 1) binarySeed[i] = 0;
+      }
+    }
+  }
+
+  // 3. Include approved connector bridges if connectBacking is enabled
   if (group.connectBacking && group.bridges && group.bridges.length > 0) {
     for (const bridge of group.bridges) {
       rasterizeBridge(binarySeed, localWidth, localHeight, minX, minY, bridge);
     }
   }
 
-  // Compute local Euclidean Distance Transform
+  // 4. Contour smoothing
+  if (group.backingOverride?.smoothingRadius && group.backingOverride.smoothingRadius > 0) {
+    binarySeed = applyContourSmoothing(
+      binarySeed,
+      localWidth,
+      localHeight,
+      group.backingOverride.smoothingRadius
+    );
+  }
+
+  // 5. Compute local Euclidean Distance Transform
   const distField = computeEuclideanDistanceTransform(binarySeed, localWidth, localHeight);
 
   return {
@@ -129,16 +210,18 @@ export function compositeSticker(
 
   for (let ly = 0; ly < localHeight; ly++) {
     const sy = patchBounds.y + ly;
-    const sheetRowOffset = sy * sheetWidth;
+    const isInsideSheetY = sy >= 0 && sy < sheetHeight;
+    const sheetRowOffset = isInsideSheetY ? sy * sheetWidth : 0;
     const localRowOffset = ly * localWidth;
 
     for (let lx = 0; lx < localWidth; lx++) {
       const sx = patchBounds.x + lx;
-      const sheetIdx = sheetRowOffset + sx;
+      const isInsideSheet = isInsideSheetY && sx >= 0 && sx < sheetWidth;
+      const sheetIdx = isInsideSheet ? sheetRowOffset + sx : 0;
       const localIdx = localRowOffset + lx;
       const outOffset = localIdx * 4;
 
-      const label = labelMap[sheetIdx];
+      const label = isInsideSheet ? labelMap[sheetIdx] : 0;
       const isOwnedArtwork = ownedLabels.has(label);
       const artworkAlpha = isOwnedArtwork ? alphaMask[sheetIdx] : 0;
 

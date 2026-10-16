@@ -12,7 +12,9 @@ import {
   Grid,
   DownloadCloud,
   RefreshCw,
-  CheckCircle2
+  CheckCircle2,
+  FolderOpen,
+  Save
 } from 'lucide-react';
 import { ViewMode } from '../types';
 
@@ -38,6 +40,8 @@ interface ToolbarProps {
   isOfflineReady?: boolean;
   needRefresh?: boolean;
   onRefreshClick?: () => void;
+  onSaveProject?: () => void;
+  onLoadProject?: (file: File) => void;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
@@ -61,9 +65,12 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onInstallClick,
   isOfflineReady,
   needRefresh,
-  onRefreshClick
+  onRefreshClick,
+  onSaveProject,
+  onLoadProject
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const projectInputRef = useRef<HTMLInputElement>(null);
 
   const handleImportClick = async () => {
     if (window.desktopAPI && onImportDataUrl) {
@@ -82,17 +89,23 @@ export const Toolbar: React.FC<ToolbarProps> = ({
     }
   };
 
+  const handleProjectFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0] && onLoadProject) {
+      onLoadProject(e.target.files[0]);
+    }
+  };
+
   const handleAboutClick = () => {
     if (window.desktopAPI) {
       window.desktopAPI.showAbout();
     } else {
-      alert("Sticker Studio — Sheet Extractor v1.0.0\n\nLocal-first illustration extractor and print-ready transparent PNG die-cut generator.\nZero Cloud Dependencies.");
+      alert("Sticker Studio — Sheet Extractor v1.1.0\n\nAdvanced Extraction Editor with Mask Painting, Touching-Object Splits, Backing Controls, and .stickerstudio Project Persistence.\nZero Cloud Dependencies.");
     }
   };
 
   return (
     <header className="h-14 bg-white border-b border-neutral-200 px-4 flex items-center justify-between select-none shadow-sm z-30">
-      {/* Left: Branding & Upload */}
+      {/* Left: Branding & Upload & Project Actions */}
       <div className="flex items-center gap-3">
         <button
           onClick={handleAboutClick}
@@ -122,17 +135,49 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           className="hidden"
         />
 
+        <input
+          type="file"
+          ref={projectInputRef}
+          onChange={handleProjectFileChange}
+          accept=".stickerstudio,.zip"
+          className="hidden"
+        />
+
         <button
           onClick={handleImportClick}
           disabled={isProcessing}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-pink-50 hover:bg-pink-100 text-pink-700 font-semibold text-xs transition border border-pink-200 shadow-xs active:scale-98 disabled:opacity-50 cursor-pointer"
         >
           <Upload className="w-3.5 h-3.5" />
-          <span>{fileName ? 'Import Another Sheet' : 'Import Sticker Sheet'}</span>
+          <span>{fileName ? 'Import Sheet' : 'Import Sticker Sheet'}</span>
         </button>
 
+        {onLoadProject && (
+          <button
+            onClick={() => projectInputRef.current?.click()}
+            disabled={isProcessing}
+            title="Open a saved .stickerstudio project"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-neutral-100 text-neutral-700 font-semibold text-xs transition border border-neutral-200 shadow-xs cursor-pointer"
+          >
+            <FolderOpen className="w-3.5 h-3.5 text-neutral-500" />
+            <span>Open Project</span>
+          </button>
+        )}
+
+        {fileName && onSaveProject && (
+          <button
+            onClick={onSaveProject}
+            disabled={isProcessing}
+            title="Save complete project as .stickerstudio"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-neutral-100 text-neutral-700 font-semibold text-xs transition border border-neutral-200 shadow-xs cursor-pointer"
+          >
+            <Save className="w-3.5 h-3.5 text-pink-600" />
+            <span>Save Project</span>
+          </button>
+        )}
+
         {fileName && (
-          <span className="text-xs text-neutral-500 font-mono truncate max-w-[160px] bg-neutral-50 px-2 py-1 rounded border border-neutral-200">
+          <span className="text-xs text-neutral-500 font-mono truncate max-w-[140px] bg-neutral-50 px-2 py-1 rounded border border-neutral-200">
             {fileName}
           </span>
         )}

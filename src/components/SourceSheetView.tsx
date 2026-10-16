@@ -16,6 +16,7 @@ interface SourceSheetViewProps {
   onMergeSelectedGroups: () => void;
   onSplitSelectedGroup: () => void;
   onToggleGroupExcluded: (groupId: string) => void;
+  onEditGroup?: (groupId: string) => void;
 }
 
 // Visual color palette for distinct sticker groups
@@ -37,7 +38,8 @@ export const SourceSheetView: React.FC<SourceSheetViewProps> = ({
   onGroupSelectedComponents,
   onMergeSelectedGroups,
   onSplitSelectedGroup,
-  onToggleGroupExcluded
+  onToggleGroupExcluded,
+  onEditGroup
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -257,6 +259,10 @@ export const SourceSheetView: React.FC<SourceSheetViewProps> = ({
                     onClick={(e) => {
                       e.stopPropagation();
                       onSelectGroup(group.id, e.shiftKey);
+                    }}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      onEditGroup?.(group.id);
                     }}
                   />
 

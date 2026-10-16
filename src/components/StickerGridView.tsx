@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Download, Sliders, CheckSquare, Square } from 'lucide-react';
+import { Download, Sliders, CheckSquare, Square, Paintbrush } from 'lucide-react';
 import { ArtworkComponent, StickerGroup } from '../types';
 import { buildGroupDistanceField, compositeSticker } from '../core/composer';
 
@@ -18,6 +18,7 @@ interface StickerGridViewProps {
   onExportSingle: (groupId: string) => void;
   onSelectGroup: (groupId: string, multi: boolean) => void;
   selectedGroupIds: string[];
+  onEditGroup?: (groupId: string) => void;
 }
 
 const StickerCard: React.FC<{
@@ -33,6 +34,7 @@ const StickerCard: React.FC<{
   onToggleExcluded: () => void;
   onUpdateBorder: (val: number) => void;
   onExport: () => void;
+  onEdit: () => void;
   isSelected: boolean;
   onSelect: () => void;
 }> = ({
@@ -48,6 +50,7 @@ const StickerCard: React.FC<{
   onToggleExcluded,
   onUpdateBorder,
   onExport,
+  onEdit,
   isSelected,
   onSelect
 }) => {
@@ -151,16 +154,30 @@ const StickerCard: React.FC<{
           </span>
         </div>
 
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onExport();
-          }}
-          title="Export this PNG"
-          className="p-1 rounded-md text-neutral-400 hover:text-pink-600 hover:bg-pink-50 transition"
-        >
-          <Download className="w-3.5 h-3.5" />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onEdit();
+            }}
+            title="Advanced Editor (Masks, Touching Splits, Backing)"
+            className="p-1 rounded-md text-pink-600 hover:text-pink-700 hover:bg-pink-50 transition flex items-center gap-1 text-[11px] font-semibold cursor-pointer"
+          >
+            <Paintbrush className="w-3.5 h-3.5" />
+            <span>Edit</span>
+          </button>
+
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onExport();
+            }}
+            title="Export this PNG"
+            className="p-1 rounded-md text-neutral-400 hover:text-pink-600 hover:bg-pink-50 transition cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
 
       {/* Canvas Preview Area */}
@@ -215,7 +232,8 @@ export const StickerGridView: React.FC<StickerGridViewProps> = ({
   onUpdateGroupBorder,
   onExportSingle,
   onSelectGroup,
-  selectedGroupIds
+  selectedGroupIds,
+  onEditGroup
 }) => {
   if (!sourceImage || !labelMap || !alphaMask) {
     return (
@@ -245,6 +263,7 @@ export const StickerGridView: React.FC<StickerGridViewProps> = ({
             onToggleExcluded={() => onToggleGroupExcluded(group.id)}
             onUpdateBorder={(val) => onUpdateGroupBorder(group.id, val)}
             onExport={() => onExportSingle(group.id)}
+            onEdit={() => onEditGroup?.(group.id)}
             isSelected={selectedGroupIds.includes(group.id)}
             onSelect={() => onSelectGroup(group.id, false)}
           />
