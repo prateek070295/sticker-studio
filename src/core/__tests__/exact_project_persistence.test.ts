@@ -467,6 +467,147 @@ describe('Exact Project Persistence Regression Test', () => {
     expect(postLoadExport.croppedRgba).toEqual(preSaveExport.croppedRgba);
     expect(postLoadExport.croppedRgba).not.toEqual(baseExport.croppedRgba);
   });
+
+  it('rejects candidate project when individually acceptable backing masks together exceed cumulative budget, keeping active workspace intact', async () => {
+    const width = 20;
+    const height = 20;
+    const pixelCount = width * height;
+
+    const sourceData = new Uint8ClampedArray(pixelCount * 4);
+    for (let i = 0; i < pixelCount * 4; i += 4) {
+      sourceData[i] = 100;
+      sourceData[i + 1] = 150;
+      sourceData[i + 2] = 200;
+      sourceData[i + 3] = 255;
+    }
+    const sourceImage = {
+      width,
+      height,
+      data: sourceData,
+      colorSpace: 'srgb'
+    } as unknown as ImageData;
+
+    const alphaMask = new Uint8Array(pixelCount).fill(255);
+    const labelMap = new Uint16Array(pixelCount).fill(1);
+
+    const components: ArtworkComponent[] = [
+      {
+        id: 'c1',
+        label: 1,
+        bounds: { x: 0, y: 0, width: 10, height: 20 },
+        centroid: { x: 5, y: 10 },
+        pixelCount: 200,
+        isTiny: false
+      },
+      {
+        id: 'c2',
+        label: 2,
+        bounds: { x: 10, y: 0, width: 10, height: 20 },
+        centroid: { x: 15, y: 10 },
+        pixelCount: 200,
+        isTiny: false
+      }
+    ];
+
+    // Each mask is 100 bytes (10x10) - well below MAX_PER_ENTRY_BYTES (150MB)
+    const mask1 = new Uint8Array(100).fill(1);
+    const mask2 = new Uint8Array(100).fill(1);
+
+    const groups: StickerGroup[] = [
+      {
+        id: 'g1',
+        name: 'sticker_001',
+        componentIds: ['c1'],
+        bounds: { x: 0, y: 0, width: 10, height: 20 },
+        borderThickness: 5,
+        customBorder: false,
+        whiteBackingEnabled: true,
+        connectBacking: true,
+        smoothingRadius: 2,
+        backingOverride: {
+          groupId: 'g1',
+          bounds: { x: 0, y: 0, width: 10, height: 10 },
+          addedMask: mask1
+        }
+      },
+      {
+        id: 'g2',
+        name: 'sticker_002',
+        componentIds: ['c2'],
+        bounds: { x: 10, y: 0, width: 10, height: 20 },
+        borderThickness: 5,
+        customBorder: false,
+        whiteBackingEnabled: true,
+        connectBacking: true,
+        smoothingRadius: 2,
+        backingOverride: {
+          groupId: 'g2',
+          bounds: { x: 10, y: 0, width: 10, height: 10 },
+          addedMask: mask2
+        }
+      }
+    ];
+
+    const saveState: ProjectSaveState = {
+      name: 'cumulative_budget_test',
+      sourceImage,
+      alphaMask,
+      labelMap,
+      settings: {
+        bgTolerance: 15,
+        edgeSoftness: 1,
+        minComponentArea: 10,
+        groupingProximityThreshold: 35,
+        enableTitleDetection: false
+      },
+      components,
+      groups,
+      holes: [],
+      globalBorderThickness: 5,
+      globalSolidBacking: true,
+      globalWhiteBacking: true
+    };
+
+    const archiveBlob = await saveProjectArchive(saveState);
+
+    // Normal load without artificial budget constraint succeeds
+    const okLoaded = await loadProjectArchive(archiveBlob);
+    expect(okLoaded.groups.length).toBe(2);
+
+    // Measure base uncompressed bytes (project.json + alpha + label + source):
+    // Setting cumulative limit so that base + first backing mask fits, but second backing mask exceeds it
+    // Each mask is individually acceptable (100 bytes < maxPerEntryBytes), but together with base they exceed budget
+    const tightBudget = 2500; // base is ~2450 bytes; mask 1 brings to ~2550, exceeding 2500
+
+    let activeWorkspace = {
+      name: 'Original Active Workspace',
+      groupsCount: 99,
+      intact: true
+    };
+
+    let thrownError: Error | null = null;
+    try {
+      const candidate = await loadProjectArchive(archiveBlob, {
+        maxUncompressedTotalBytes: tightBudget,
+        maxPerEntryBytes: 150 * 1024 * 1024
+      });
+      activeWorkspace = {
+        name: candidate.metadata.name,
+        groupsCount: candidate.groups.length,
+        intact: false
+      };
+    } catch (err) {
+      thrownError = err as Error;
+    }
+
+    expect(thrownError).not.toBeNull();
+    expect(thrownError?.message).toMatch(/Cumulative decompression budget exceeded/);
+
+    // Assert active workspace was NOT mutated or replaced
+    expect(activeWorkspace.name).toBe('Original Active Workspace');
+    expect(activeWorkspace.groupsCount).toBe(99);
+    expect(activeWorkspace.intact).toBe(true);
+  });
 });
 
 

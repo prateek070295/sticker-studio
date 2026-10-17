@@ -331,12 +331,24 @@ export function checkZipHeaderPathTraversal(rawBytes: Uint8Array): void {
   }
 }
 
+export interface LoadArchiveOptions {
+  maxUncompressedTotalBytes?: number;
+  maxDecompressionRatio?: number;
+  maxPerEntryBytes?: number;
+}
+
 /**
  * Loads, decompresses, and transactionally validates a .stickerstudio archive.
  * Throws on corruption, invalid checksum, schema mismatch, or path traversal,
  * ensuring the active workspace is never replaced with invalid state.
+ *
+ * Note: Cumulative post-decompression checks enforce defense-in-depth size caps
+ * on extracted payloads; they do not bound in-flight memory amplification during zip decompression.
  */
-export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<LoadedProjectData> {
+export async function loadProjectArchive(
+  fileOrBlob: File | Blob,
+  options?: LoadArchiveOptions
+): Promise<LoadedProjectData> {
   if (fileOrBlob.size > MAX_ARCHIVE_BYTES) {
     throw new Error(`Archive exceeds maximum allowable size (${Math.round(fileOrBlob.size / 1024 / 1024)}MB > ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB limit).`);
   }
@@ -345,8 +357,26 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
   const rawBytes = fileOrBlob instanceof Uint8Array ? fileOrBlob : new Uint8Array(await fileOrBlob.arrayBuffer());
   checkZipHeaderPathTraversal(rawBytes);
 
+  const maxTotalBytes = options?.maxUncompressedTotalBytes ?? MAX_UNCOMPRESSED_TOTAL_BYTES;
+  const maxRatio = options?.maxDecompressionRatio ?? MAX_DECOMPRESSION_RATIO;
+  const maxEntryBytes = options?.maxPerEntryBytes ?? MAX_PER_ENTRY_BYTES;
+
   const zip = new JSZip();
   let uncompressedTotalBytes = 0;
+
+  const enforceCumulativeBudget = (currentBytes: number) => {
+    if (currentBytes > maxTotalBytes) {
+      const currentMb = (currentBytes / (1024 * 1024)).toFixed(2);
+      const maxMb = (maxTotalBytes / (1024 * 1024)).toFixed(2);
+      throw new Error(`Cumulative decompression budget exceeded: Total uncompressed data (${currentMb}MB / ${currentBytes} bytes) exceeds ${maxMb}MB (${maxTotalBytes} bytes) limit.`);
+    }
+    if (fileOrBlob.size > 1024) {
+      const ratio = currentBytes / fileOrBlob.size;
+      if (ratio > maxRatio) {
+        throw new Error(`Decompression ratio violation: Archive expansion ratio (${ratio.toFixed(1)}x) exceeds allowable ${maxRatio}x threshold.`);
+      }
+    }
+  };
 
   let loadedZip: JSZip;
   try {
@@ -370,10 +400,11 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
   }
 
   const projectJsonBytes = await projectFile.async('uint8array');
-  if (projectJsonBytes.length > MAX_PER_ENTRY_BYTES) {
-    throw new Error(`Per-entry size budget exceeded: project.json size (${Math.round(projectJsonBytes.length / 1024 / 1024)}MB) exceeds ${MAX_PER_ENTRY_BYTES / 1024 / 1024}MB limit.`);
+  if (projectJsonBytes.length > maxEntryBytes) {
+    throw new Error(`Per-entry size budget exceeded: project.json size (${Math.round(projectJsonBytes.length / 1024 / 1024)}MB) exceeds ${maxEntryBytes / 1024 / 1024}MB limit.`);
   }
   uncompressedTotalBytes += projectJsonBytes.length;
+  enforceCumulativeBudget(uncompressedTotalBytes);
 
   const projectJsonStr = new TextDecoder().decode(projectJsonBytes);
   let serialized: SerializedProject;
@@ -440,13 +471,14 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
     throw new Error('Invalid .stickerstudio archive: missing alpha_mask.bin payload.');
   }
   const alphaBytes = await alphaFile.async('uint8array');
-  if (alphaBytes.length > MAX_PER_ENTRY_BYTES) {
-    throw new Error(`Per-entry size budget exceeded: alpha_mask.bin (${Math.round(alphaBytes.length / 1024 / 1024)}MB) exceeds ${MAX_PER_ENTRY_BYTES / 1024 / 1024}MB limit.`);
+  if (alphaBytes.length > maxEntryBytes) {
+    throw new Error(`Per-entry size budget exceeded: alpha_mask.bin (${Math.round(alphaBytes.length / 1024 / 1024)}MB) exceeds ${maxEntryBytes / 1024 / 1024}MB limit.`);
   }
   if (alphaBytes.length !== pixelCount) {
     throw new Error(`Corrupted alpha_mask.bin: expected ${pixelCount} bytes, got ${alphaBytes.length}.`);
   }
   uncompressedTotalBytes += alphaBytes.length;
+  enforceCumulativeBudget(uncompressedTotalBytes);
   const alphaMask = new Uint8Array(alphaBytes);
 
   // 7. Validate label_map.bin presence, size, and decode little-endian Uint16
@@ -455,13 +487,14 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
     throw new Error('Invalid .stickerstudio archive: missing label_map.bin payload.');
   }
   const labelBytes = await labelFile.async('uint8array');
-  if (labelBytes.length > MAX_PER_ENTRY_BYTES) {
-    throw new Error(`Per-entry size budget exceeded: label_map.bin (${Math.round(labelBytes.length / 1024 / 1024)}MB) exceeds ${MAX_PER_ENTRY_BYTES / 1024 / 1024}MB limit.`);
+  if (labelBytes.length > maxEntryBytes) {
+    throw new Error(`Per-entry size budget exceeded: label_map.bin (${Math.round(labelBytes.length / 1024 / 1024)}MB) exceeds ${maxEntryBytes / 1024 / 1024}MB limit.`);
   }
   if (labelBytes.length !== pixelCount * 2) {
     throw new Error(`Corrupted label_map.bin: expected ${pixelCount * 2} bytes, got ${labelBytes.length}.`);
   }
   uncompressedTotalBytes += labelBytes.length;
+  enforceCumulativeBudget(uncompressedTotalBytes);
 
   const labelMap = new Uint16Array(pixelCount);
   const labelView = new DataView(labelBytes.buffer, labelBytes.byteOffset, labelBytes.byteLength);
@@ -480,22 +513,11 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
   }
 
   const sourceBytes = await sourceFile.async('uint8array');
-  if (sourceBytes.length > MAX_PER_ENTRY_BYTES) {
-    throw new Error(`Per-entry size budget exceeded: source.png (${Math.round(sourceBytes.length / 1024 / 1024)}MB) exceeds ${MAX_PER_ENTRY_BYTES / 1024 / 1024}MB limit.`);
+  if (sourceBytes.length > maxEntryBytes) {
+    throw new Error(`Per-entry size budget exceeded: source.png (${Math.round(sourceBytes.length / 1024 / 1024)}MB) exceeds ${maxEntryBytes / 1024 / 1024}MB limit.`);
   }
   uncompressedTotalBytes += sourceBytes.length;
-
-  if (uncompressedTotalBytes > MAX_UNCOMPRESSED_TOTAL_BYTES) {
-    throw new Error(`Cumulative decompression budget exceeded: Total uncompressed data (${Math.round(uncompressedTotalBytes / 1024 / 1024)}MB) exceeds ${MAX_UNCOMPRESSED_TOTAL_BYTES / 1024 / 1024}MB limit.`);
-  }
-
-  // Check decompression ratio (zip bomb defense)
-  if (fileOrBlob.size > 1024) {
-    const ratio = uncompressedTotalBytes / fileOrBlob.size;
-    if (ratio > MAX_DECOMPRESSION_RATIO) {
-      throw new Error(`Decompression ratio violation: Archive expansion ratio (${ratio.toFixed(1)}x) exceeds allowable ${MAX_DECOMPRESSION_RATIO}x threshold (Zip Bomb defense).`);
-    }
-  }
+  enforceCumulativeBudget(uncompressedTotalBytes);
 
   // 9. Source image SHA-256 integrity verification
   const calculatedSha256 = await computeSha256(sourceBytes);
@@ -526,10 +548,11 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
           throw new Error(`Invalid .stickerstudio archive: missing backing mask entry "${bo.addedMaskEntry}".`);
         }
         const maskBytes = await file.async('uint8array');
-        if (maskBytes.length > MAX_PER_ENTRY_BYTES) {
-          throw new Error(`Per-entry size budget exceeded: ${bo.addedMaskEntry} exceeds ${MAX_PER_ENTRY_BYTES / 1024 / 1024}MB limit.`);
+        if (maskBytes.length > maxEntryBytes) {
+          throw new Error(`Per-entry size budget exceeded: ${bo.addedMaskEntry} exceeds ${maxEntryBytes / 1024 / 1024}MB limit.`);
         }
         uncompressedTotalBytes += maskBytes.length;
+        enforceCumulativeBudget(uncompressedTotalBytes);
         if (bo.bounds && maskBytes.length !== bo.bounds.width * bo.bounds.height) {
           throw new Error(`Corrupted backing mask: ${bo.addedMaskEntry} length (${maskBytes.length}) does not match bounds dimensions (${bo.bounds.width * bo.bounds.height}).`);
         }
@@ -547,10 +570,11 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
           throw new Error(`Invalid .stickerstudio archive: missing backing mask entry "${bo.removedMaskEntry}".`);
         }
         const maskBytes = await file.async('uint8array');
-        if (maskBytes.length > MAX_PER_ENTRY_BYTES) {
-          throw new Error(`Per-entry size budget exceeded: ${bo.removedMaskEntry} exceeds ${MAX_PER_ENTRY_BYTES / 1024 / 1024}MB limit.`);
+        if (maskBytes.length > maxEntryBytes) {
+          throw new Error(`Per-entry size budget exceeded: ${bo.removedMaskEntry} exceeds ${maxEntryBytes / 1024 / 1024}MB limit.`);
         }
         uncompressedTotalBytes += maskBytes.length;
+        enforceCumulativeBudget(uncompressedTotalBytes);
         if (bo.bounds && maskBytes.length !== bo.bounds.width * bo.bounds.height) {
           throw new Error(`Corrupted backing mask: ${bo.removedMaskEntry} length (${maskBytes.length}) does not match bounds dimensions (${bo.bounds.width * bo.bounds.height}).`);
         }
@@ -560,6 +584,9 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
       }
     }
   }
+
+  // 12. Final cumulative limit & expansion ratio enforcement before accepting candidate project
+  enforceCumulativeBudget(uncompressedTotalBytes);
 
   // Transactionally validated and ready for hydration
   return {
