@@ -1,12 +1,15 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Upload, Sparkles, Layers, ArrowRight, Loader2, Image as ImageIcon } from 'lucide-react';
 import { useProjectState } from './state/useProjectState';
+import { usePhotoMode } from './state/usePhotoMode';
 import { Toolbar } from './components/Toolbar';
 import { SourceSheetView } from './components/SourceSheetView';
 import { StickerGridView } from './components/StickerGridView';
 import { ControlsPanel } from './components/ControlsPanel';
+import { PhotoModeView } from './components/photo/PhotoModeView';
 import { usePWA } from './pwa/usePWA';
 import { InstallModal } from './components/InstallModal';
+import { AppMode } from './types';
 
 const AdvancedEditorModal = React.lazy(() =>
   import('./components/editor/AdvancedEditorModal').then(module => ({
@@ -109,7 +112,25 @@ export default function App() {
     reloadApp
   } = usePWA();
 
+  const [appMode, setAppMode] = useState<AppMode>('sheet');
+  const photo = usePhotoMode();
+
   const [isDragOver, setIsDragOver] = useState<boolean>(false);
+
+  // Global project archive loader
+  const handleLoadProjectFile = useCallback(async (file: File) => {
+    try {
+      const loaded = await loadProject(file);
+      if (loaded && loaded.metadata && loaded.metadata.projectType === 'photo') {
+        setAppMode('photo');
+        photo.loadPhotoProject(loaded);
+      } else {
+        setAppMode('sheet');
+      }
+    } catch (err) {
+      console.error('Failed to load project:', err);
+    }
+  }, [loadProject, photo]);
 
   // Global drag-and-drop listener
   const handleDragOver = (e: React.DragEvent) => {
@@ -122,11 +143,18 @@ export default function App() {
     setIsDragOver(false);
   };
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      importImage(e.dataTransfer.files[0]);
+      const file = e.dataTransfer.files[0];
+      if (file.name.endsWith('.stickerstudio') || file.name.endsWith('.zip')) {
+        await handleLoadProjectFile(file);
+      } else if (appMode === 'photo') {
+        await photo.importPhoto(file);
+      } else {
+        importImage(file);
+      }
     }
   };
 
@@ -148,13 +176,16 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
         if (e.shiftKey) {
-          redo();
+          if (appMode === 'photo') photo.redo();
+          else redo();
         } else {
-          undo();
+          if (appMode === 'photo') photo.undo();
+          else undo();
         }
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
         e.preventDefault();
-        redo();
+        if (appMode === 'photo') photo.redo();
+        else redo();
       } else if (e.key === 'v' || e.key === 'V') {
         setToolMode('select');
       } else if (e.key === 'l' || e.key === 'L') {
@@ -167,7 +198,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo, setToolMode, setSelectedGroupIds, setSelectedComponentIds]);
+  }, [appMode, photo, undo, redo, setToolMode, setSelectedGroupIds, setSelectedComponentIds]);
 
   return (
     <div
@@ -178,17 +209,31 @@ export default function App() {
     >
       {/* Top Application Toolbar */}
       <Toolbar
-        fileName={fileName}
+        appMode={appMode}
+        onAppModeChange={setAppMode}
+        fileName={appMode === 'photo' ? (photo.sourceImage ? photo.fileName : '') : fileName}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
-        previewBg={previewBg}
-        onPreviewBgChange={setPreviewBg}
-        canUndo={canUndo}
-        canRedo={canRedo}
-        onUndo={undo}
-        onRedo={redo}
-        onImportFile={importImage}
-        onImportDataUrl={importFromDataUrl}
+        previewBg={appMode === 'photo' ? photo.previewBg : previewBg}
+        onPreviewBgChange={appMode === 'photo' ? photo.setPreviewBg : setPreviewBg}
+        canUndo={appMode === 'photo' ? photo.canUndo : canUndo}
+        canRedo={appMode === 'photo' ? photo.canRedo : canRedo}
+        onUndo={appMode === 'photo' ? photo.undo : undo}
+        onRedo={appMode === 'photo' ? photo.redo : redo}
+        onImportFile={(file) => {
+          if (appMode === 'photo') {
+            photo.importPhoto(file);
+          } else {
+            importImage(file);
+          }
+        }}
+        onImportDataUrl={(dataUrl, name) => {
+          if (appMode === 'photo') {
+            photo.importFromDataUrl(dataUrl, name);
+          } else {
+            importFromDataUrl(dataUrl, name);
+          }
+        }}
         onExportSelected={() => {
           if (selectedGroupIds.length > 0) {
             exportSingleSticker(selectedGroupIds[0]);
@@ -197,19 +242,22 @@ export default function App() {
         onExportAll={exportAllZip}
         selectedCount={selectedGroupIds.length}
         totalCount={groups.filter(g => !g.excludedFromExport).length}
-        isProcessing={isProcessing}
+        isProcessing={appMode === 'photo' ? photo.isProcessing : isProcessing}
         canInstall={canInstall}
         onInstallClick={triggerInstall}
         isOfflineReady={isOfflineReady}
         needRefresh={needRefresh}
-        onSaveProject={saveProject}
-        onLoadProject={loadProject}
+        onSaveProject={appMode === 'photo' ? photo.savePhotoProject : saveProject}
+        onLoadProject={handleLoadProjectFile}
+        onExportPhotoPng={photo.exportWhiteBacked}
+        onExportPhotoZip={photo.exportZip}
+        hasPhotoCutout={Boolean(photo.mask)}
         onRefreshClick={() => {
-          if (isProcessing || exportProgress) {
-            alert('Please wait for the current extraction or export to finish, then click Update again.');
+          if (isProcessing || exportProgress || photo.isProcessing) {
+            alert('Please wait for the current operation to finish, then click Update again.');
             return;
           }
-          if (sourceImage && !confirm('Updating reloads Sticker Studio. Your current sheet, groups and mask edits will be cleared — export anything you need first.\n\nUpdate now?')) {
+          if ((sourceImage || photo.sourceImage) && !confirm('Updating reloads Sticker Studio. Your current work will be cleared — export anything you need first.\n\nUpdate now?')) {
             return;
           }
           reloadApp();
@@ -218,7 +266,84 @@ export default function App() {
 
       {/* Main Workspace Body */}
       <main className="flex-1 flex overflow-hidden relative">
-        {sourceImage ? (
+        {appMode === 'photo' ? (
+          photo.sourceImage ? (
+            <PhotoModeView photo={photo} />
+          ) : (
+            /* Photo Mode Empty Landing / Import Screen */
+            <div className="flex-1 flex flex-col items-center justify-center p-8 bg-linear-to-b from-sky-50/50 to-neutral-100 overflow-y-auto">
+              <div className="max-w-2xl w-full flex flex-col items-center text-center">
+                {/* Badge */}
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-sky-100 text-sky-700 text-xs font-semibold mb-4 border border-sky-200">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Production Local-First Photo Cutout</span>
+                </div>
+
+                {/* Title */}
+                <h2 className="text-3xl font-extrabold text-neutral-900 tracking-tight mb-2">
+                  Turn Family & Group Photos into Cutout Stickers
+                </h2>
+                <p className="text-sm text-neutral-500 max-w-lg mb-8">
+                  Preserve real photographic faces and 100% original camera RGB pixels. Drop any portrait or group photo to instantly extract clean foreground stickers with smooth die-cut white borders.
+                </p>
+
+                {/* Dropzone Box */}
+                <div
+                  onClick={async (e) => {
+                    if (window.desktopAPI) {
+                      e.preventDefault();
+                      const result = await window.desktopAPI.openFileDialog();
+                      if (result) {
+                        photo.importFromDataUrl(result.dataUrl, result.fileName);
+                      }
+                    }
+                  }}
+                  className="w-full flex flex-col items-center justify-center p-10 border-2 border-dashed border-sky-300 hover:border-sky-500 bg-white hover:bg-sky-50/40 rounded-2xl cursor-pointer shadow-xs hover:shadow-md transition group relative"
+                >
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) {
+                        photo.importPhoto(e.target.files[0]);
+                      }
+                    }}
+                    className="absolute inset-0 opacity-0 cursor-pointer"
+                  />
+                  <div className="w-14 h-14 rounded-2xl bg-sky-100 group-hover:bg-sky-200 flex items-center justify-center text-sky-600 mb-4 transition group-hover:scale-105 pointer-events-none">
+                    <Upload className="w-7 h-7" />
+                  </div>
+                  <div className="text-sm font-bold text-neutral-800 mb-1 pointer-events-none">
+                    Click to browse or drop family / portrait photo here
+                  </div>
+                  <div className="text-xs text-neutral-400 font-mono pointer-events-none">
+                    Supports high-resolution PNG, JPEG, WebP (up to 4000×4000+)
+                  </div>
+                </div>
+
+                {/* Quality & Privacy Guarantees */}
+                <div className="w-full mt-8 grid grid-cols-2 md:grid-cols-4 gap-3 text-left">
+                  <div className="p-3 bg-white rounded-xl border border-neutral-200 shadow-2xs">
+                    <div className="text-xs font-bold text-neutral-800 mb-0.5">🔒 100% Private</div>
+                    <div className="text-[11px] text-neutral-500 leading-snug">Client-side AI via WebAssembly. Zero photo uploads to the cloud.</div>
+                  </div>
+                  <div className="p-3 bg-white rounded-xl border border-neutral-200 shadow-2xs">
+                    <div className="text-xs font-bold text-neutral-800 mb-0.5">📷 True Pixels</div>
+                    <div className="text-[11px] text-neutral-500 leading-snug">Preserves original camera colors, skin details, and textures bit-for-bit.</div>
+                  </div>
+                  <div className="p-3 bg-white rounded-xl border border-neutral-200 shadow-2xs">
+                    <div className="text-xs font-bold text-neutral-800 mb-0.5">🖌️ Touch-up Tools</div>
+                    <div className="text-[11px] text-neutral-500 leading-snug">Interactive brush to erase unwanted objects or restore edges.</div>
+                  </div>
+                  <div className="p-3 bg-white rounded-xl border border-neutral-200 shadow-2xs">
+                    <div className="text-xs font-bold text-neutral-800 mb-0.5">✂️ Die-Cut Borders</div>
+                    <div className="text-[11px] text-neutral-500 leading-snug">Smooth, print-ready continuous white borders from 0 to 60px.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )
+        ) : sourceImage ? (
           <>
             {/* Left/Center Workspace: Source Sheet View OR Sticker Grid View */}
             {viewMode === 'sheet' ? (

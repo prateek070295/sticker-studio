@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Model Comparison — MediaPipe vs BodyPix</title>
+  <!-- Load TensorFlow.js and Body-Segmentation -->
+  <script src="/vendor/tf.min.js"></script>
+  <script src="/vendor/body-segmentation.min.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; margin: 20px; }
+    h1, h2, h3 { color: #38bdf8; }
+    .status { padding: 10px; background: #1e293b; border-radius: 6px; margin-bottom: 15px; font-family: monospace; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; }
+    .card { background: #1e293b; padding: 12px; border-radius: 8px; border: 1px solid #334155; }
+    canvas, img { max-width: 100%; height: auto; border-radius: 4px; display: block; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Sticker Studio — Person Segmentation Comparison</h1>
+  <div id="status" class="status">Initializing environment...</div>
+
+  <div style="margin-bottom: 20px;">
+    <img id="source-img" src="/fixtures/prototype_touching_subjects.jpg" alt="Source Photo" crossorigin="anonymous" style="max-height: 240px;">
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>MediaPipe Selfie Segmenter</h3>
+      <div id="mp-info">Waiting...</div>
+      <canvas id="mp-canvas"></canvas>
+    </div>
+    <div class="card">
+      <h3>BodyPix Person A</h3>
+      <div id="bp-a-info">Waiting...</div>
+      <canvas id="bp-a-canvas"></canvas>
+    </div>
+    <div class="card">
+      <h3>BodyPix Person B</h3>
+      <div id="bp-b-info">Waiting...</div>
+      <canvas id="bp-b-canvas"></canvas>
+    </div>
+    <div class="card">
+      <h3>Hybrid Partition</h3>
+      <div id="hybrid-info">Waiting...</div>
+      <canvas id="hybrid-canvas"></canvas>
+    </div>
+  </div>
+
+  <script type="module">
+    import { ImageSegmenter, FilesetResolver } from '/vendor/vision_bundle.mjs';
+
+    window.ImageSegmenter = ImageSegmenter;
+    window.FilesetResolver = FilesetResolver;
+    window.__evalReady = true;
+
+    const statusEl = document.getElementById('status');
+    const imgEl = document.getElementById('source-img');
+
+    // Wait until image loads
+    await new Promise((resolve) => {
+      if (imgEl.complete && imgEl.naturalWidth > 0) resolve();
+      else imgEl.onload = resolve;
+    });
+
+    const W = imgEl.naturalWidth;
+    const H = imgEl.naturalHeight;
+    console.log(`Source image loaded: ${W}x${H}`);
+    statusEl.textContent = `Source image loaded (${W}x${H}). Ready to run evaluations.`;
+
+    function uint8ToBase64(bytes) {
+      let binary = '';
+      const len = bytes.byteLength;
+      const chunkSize = 16384;
+      for (let i = 0; i < len; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunkSize, len)));
+      }
+      return btoa(binary);
+    }
+
+    window.runMediaPipeEvaluation = async function() {
+      statusEl.textContent = 'Running MediaPipe Selfie Segmenter...';
+      const t0 = performance.now();
+      const vision = await FilesetResolver.forVisionTasks('/vendor/wasm');
+      const segmenter = await ImageSegmenter.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: '/eval-models/selfie_segmenter_landscape.tflite',
+          delegate: 'CPU', // Reliable across all headless CI/test environments
+        },
+        runningMode: 'IMAGE',
+        outputConfidenceMasks: true,
+        outputCategoryMask: true,
+      });
+      const tInit = performance.now() - t0;
+
+      const t1 = performance.now();
+      const result = segmenter.segment(imgEl);
+      const tInfer = performance.now() - t1;
+
+      // Extract confidence mask (float32 array: 0.0 to 1.0)
+      const confMask = result.confidenceMasks[0];
+      const floatData = confMask.getAsFloat32Array();
+
+      // Convert to binary mask with 0.5 threshold
+      const binMask = new Uint8Array(W * H);
+      let fgCount = 0;
+      for (let i = 0; i < floatData.length; i++) {
+        if (floatData[i] >= 0.5) {
+          binMask[i] = 1;
+          fgCount++;
+        }
+      }
+
+      // Render to canvas
+      const canvas = document.getElementById('mp-canvas');
+      canvas.width = W;
+      canvas.height = H;
+      const ctx = canvas.getContext('2d');
+      const imgData = ctx.createImageData(W, H);
+      for (let i = 0; i < W * H; i++) {
+        const off = i * 4;
+        if (binMask[i] === 1) {
+          imgData.data[off] = 56;
+          imgData.data[off + 1] = 189;
+          imgData.data[off + 2] = 248;
+          imgData.data[off + 3] = 255;
+        } else {
+          imgData.data[off + 3] = 0;
+        }
+      }
+      ctx.putImageData(imgData, 0, 0);
+
+      document.getElementById('mp-info').innerHTML = `
+        <strong>Backend:</strong> WASM SIMD (CPU)<br>
+        <strong>Init Latency:</strong> ${tInit.toFixed(1)} ms<br>
+        <strong>Inference Latency:</strong> ${tInfer.toFixed(1)} ms<br>
+        <strong>Foreground Pixels:</strong> ${fgCount.toLocaleString()} px
+      `;
+
+      return {
+        name: 'MediaPipe_SelfieSegmenter_Landscape',
+        modelAsset: 'selfie_segmenter_landscape.tflite',
+        initLatencyMs: tInit,
+        inferenceLatencyMs: tInfer,
+        width: W,
+        height: H,
+        fgCount: fgCount,
+        maskBase64: uint8ToBase64(binMask),
+      };
+    };
+
+    window.runBodyPixEvaluation = async function() {
+      statusEl.textContent = 'Running TensorFlow.js BodyPix Multi-Person...';
+      const t0 = performance.now();
+      await tf.setBackend('webgl');
+      await tf.ready();
+      const currentBackend = tf.getBackend();
+
+      const segmenter = await bodySegmentation.createSegmenter(
+        bodySegmentation.SupportedModels.BodyPix,
+        {
+          architecture: 'MobileNetV1',
+          outputStride: 16,
+          multiplier: 0.75,
+          quantBytes: 4,
+          modelUrl: '/eval-models/bodypix_mobilenet_075_stride16/model-stride16.json',
+        }
+      );
+      const tInit = performance.now() - t0;
+
+      const t1 = performance.now();
+      const people = await segmenter.segmentPeople(imgEl, {
+        multiSegmentation: true,
+        segmentBodyParts: false,
+        internalResolution: 'high',
+        segmentationThreshold: 0.7,
+        maxDetections: 5,
+        scoreThreshold: 0.4,
+        nmsRadius: 20,
+      });
+      const tInfer = performance.now() - t1;
+
+      console.log(`BodyPix detected ${people.length} people.`);
+
+      const personResults = [];
+      const colors = [[250, 204, 21], [236, 72, 153], [168, 85, 247]];
+
+      for (let p = 0; p < people.length; p++) {
+        const maskObj = people[p].mask;
+        const smallImgData = await maskObj.toImageData();
+        const maskW = smallImgData.width;
+        const maskH = smallImgData.height;
+        console.log(`BodyPix person ${p}: internal dimensions ${maskW}x${maskH}, scaling to ${W}x${H}`);
+
+        // Draw to small canvas and upscale to full resolution (1200x896)
+        const smallCanvas = document.createElement('canvas');
+        smallCanvas.width = maskW;
+        smallCanvas.height = maskH;
+        smallCanvas.getContext('2d').putImageData(smallImgData, 0, 0);
+
+        const fullCanvas = document.createElement('canvas');
+        fullCanvas.width = W;
+        fullCanvas.height = H;
+        const fullCtx = fullCanvas.getContext('2d');
+        fullCtx.imageSmoothingEnabled = false; // Nearest-neighbor threshold
+        fullCtx.drawImage(smallCanvas, 0, 0, W, H);
+
+        const fullImgData = fullCtx.getImageData(0, 0, W, H);
+        const raw = fullImgData.data;
+
+        const binMask = new Uint8Array(W * H);
+        let fgCount = 0;
+        let minX = W, maxX = 0, minY = H, maxY = 0;
+
+        for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            const idx = y * W + x;
+            if (raw[idx * 4 + 3] > 128 || raw[idx * 4] > 128) {
+              binMask[idx] = 1;
+              fgCount++;
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+
+        // Render to canvas (canvas A for p=0, canvas B for p=1)
+        const canvasId = p === 0 ? 'bp-a-canvas' : 'bp-b-canvas';
+        const infoId = p === 0 ? 'bp-a-info' : 'bp-b-info';
+        const canvas = document.getElementById(canvasId);
+        if (canvas) {
+          canvas.width = W;
+          canvas.height = H;
+          const ctx = canvas.getContext('2d');
+          const previewData = ctx.createImageData(W, H);
+          const col = colors[p % colors.length];
+          for (let i = 0; i < W * H; i++) {
+            const off = i * 4;
+            if (binMask[i] === 1) {
+              previewData.data[off] = col[0];
+              previewData.data[off + 1] = col[1];
+              previewData.data[off + 2] = col[2];
+              previewData.data[off + 3] = 255;
+            }
+          }
+          ctx.putImageData(previewData, 0, 0);
+
+          document.getElementById(infoId).innerHTML = `
+            <strong>Person ${p + 1}:</strong> ${fgCount.toLocaleString()} px<br>
+            <strong>Bounds:</strong> [${minX}..${maxX}, ${minY}..${maxY}]
+          `;
+        }
+
+        personResults.push({
+          personIndex: p,
+          fgCount: fgCount,
+          bounds: { minX, maxX, minY, maxY },
+          maskBase64: uint8ToBase64(binMask),
+        });
+      }
+
+      return {
+        name: 'BodyPix_MobileNetV1_075_MultiPerson',
+        backend: currentBackend,
+        initLatencyMs: tInit,
+        inferenceLatencyMs: tInfer,
+        detectedCount: people.length,
+        people: personResults,
+      };
+    };
+
+    window.runCompleteComparison = async function() {
+      const mpResult = await window.runMediaPipeEvaluation();
+      const bpResult = await window.runBodyPixEvaluation();
+
+      // Decode masks to binary Uint8Arrays for hybrid processing
+      const mpBin = new Uint8Array(W * H);
+      const mpRawStr = atob(mpResult.maskBase64);
+      for (let i = 0; i < W * H; i++) mpBin[i] = mpRawStr.charCodeAt(i);
+
+      let bpPersonA = new Uint8Array(W * H);
+      let bpPersonB = new Uint8Array(W * H);
+
+      if (bpResult.people.length > 0) {
+        const strA = atob(bpResult.people[0].maskBase64);
+        for (let i = 0; i < W * H; i++) bpPersonA[i] = strA.charCodeAt(i);
+      }
+      if (bpResult.people.length > 1) {
+        const strB = atob(bpResult.people[1].maskBase64);
+        for (let i = 0; i < W * H; i++) bpPersonB[i] = strB.charCodeAt(i);
+      }
+
+      // Compute Hybrid Partition:
+      // Condition 1: Pixel must be within the accepted whole-family foreground (mpBin === 1)
+      // Condition 2: If BodyPix A only -> Person A
+      // Condition 3: If BodyPix B only -> Person B
+      // Condition 4: If overlap (A and B) or unassigned -> Uncertain seam region
+      const hybridMaskA = new Uint8Array(W * H);
+      const hybridMaskB = new Uint8Array(W * H);
+      const hybridUncertain = new Uint8Array(W * H);
+
+      let countA = 0, countB = 0, countUncertain = 0;
+
+      for (let i = 0; i < W * H; i++) {
+        if (mpBin[i] === 1) {
+          const inA = bpPersonA[i] === 1;
+          const inB = bpPersonB[i] === 1;
+
+          if (inA && !inB) {
+            hybridMaskA[i] = 1;
+            countA++;
+          } else if (inB && !inA) {
+            hybridMaskB[i] = 1;
+            countB++;
+          } else {
+            // Contested or unassigned foreground pixel
+            hybridUncertain[i] = 1;
+            countUncertain++;
+          }
+        }
+      }
+
+      // Render hybrid preview
+      const canvas = document.getElementById('hybrid-canvas');
+      canvas.width = W;
+      canvas.height = H;
+      const ctx = canvas.getContext('2d');
+      const imgData = ctx.createImageData(W, H);
+
+      for (let i = 0; i < W * H; i++) {
+        const off = i * 4;
+        if (hybridMaskA[i] === 1) {
+          imgData.data[off] = 56;
+          imgData.data[off + 1] = 189;
+          imgData.data[off + 2] = 248; // Blue
+          imgData.data[off + 3] = 255;
+        } else if (hybridMaskB[i] === 1) {
+          imgData.data[off] = 250;
+          imgData.data[off + 1] = 204;
+          imgData.data[off + 2] = 21; // Yellow
+          imgData.data[off + 3] = 255;
+        } else if (hybridUncertain[i] === 1) {
+          imgData.data[off] = 239;
+          imgData.data[off + 1] = 68;
+          imgData.data[off + 2] = 68; // Red for uncertain seam
+          imgData.data[off + 3] = 255;
+        }
+      }
+      ctx.putImageData(imgData, 0, 0);
+
+      document.getElementById('hybrid-info').innerHTML = `
+        <strong>Assigned A:</strong> ${countA.toLocaleString()} px<br>
+        <strong>Assigned B:</strong> ${countB.toLocaleString()} px<br>
+        <strong>Uncertain Seam:</strong> ${countUncertain.toLocaleString()} px (${((countUncertain / mpResult.fgCount) * 100).toFixed(1)}%)
+      `;
+
+      statusEl.textContent = 'Comparison and Hybrid Partition complete!';
+
+      return {
+        imageWidth: W,
+        imageHeight: H,
+        mediapipe: mpResult,
+        bodypix: bpResult,
+        hybrid: {
+          assignedACount: countA,
+          assignedBCount: countB,
+          uncertainCount: countUncertain,
+          maskABase64: uint8ToBase64(hybridMaskA),
+          maskBBase64: uint8ToBase64(hybridMaskB),
+          uncertainBase64: uint8ToBase64(hybridUncertain),
+        }
+      };
+    };
+  </script>
+</body>
+</html>

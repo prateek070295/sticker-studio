@@ -79,7 +79,10 @@ export interface ExtractionSettings {
   gridConfig?: GridSheetConfig;
 }
 
+export type AppMode = 'sheet' | 'photo';
 export type ViewMode = 'sheet' | 'grid';
+export type PhotoToolMode = 'pan' | 'erase' | 'restore';
+export type PhotoViewMode = 'sticker' | 'artwork' | 'before-after' | 'original';
 export type ToolMode =
   | 'select'
   | 'lasso'
@@ -181,6 +184,7 @@ export interface MaskPayloadMetadata {
 export interface ProjectMetadata {
   version: '1.1';
   schemaVersion: 1 | 2;
+  projectType?: 'sheet' | 'photo';
   createdAt: number;
   updatedAt: number;
   name: string;
@@ -195,6 +199,12 @@ export interface ProjectMetadata {
   globalSolidBacking: boolean;
   globalWhiteBacking: boolean;
   gridConfig?: GridSheetConfig;
+  photoSettings?: {
+    borderThickness: number;
+    previewBg: 'checker' | 'dark' | 'light' | 'saturated';
+    hasRemovedBackground: boolean;
+    viewMode?: PhotoViewMode;
+  };
 }
 
 export interface SerializedProject {

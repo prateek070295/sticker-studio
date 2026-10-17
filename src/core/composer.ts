@@ -224,6 +224,8 @@ export function compositeSticker(
   croppedWidth: number;
   croppedHeight: number;
   croppedRgba: Uint8ClampedArray;
+  croppedX?: number;
+  croppedY?: number;
 } {
   const localWidth = patchBounds.width;
   const localHeight = patchBounds.height;
@@ -357,6 +359,8 @@ export function compositeSticker(
     height: localHeight,
     croppedWidth,
     croppedHeight,
-    croppedRgba
+    croppedRgba,
+    croppedX: paddedMinX,
+    croppedY: paddedMinY
   };
 }

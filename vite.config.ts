@@ -15,8 +15,8 @@ export default defineConfig({
       registerType: 'prompt',
       injectRegister: false,
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,jpg,jpeg,webp,wasm}'],
-        maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
+        globPatterns: ['**/*.{js,mjs,css,html,ico,png,svg,jpg,jpeg,webp,wasm,tflite}'],
+        maximumFileSizeToCacheInBytes: 25 * 1024 * 1024,
         navigateFallback: 'index.html',
         cleanupOutdatedCaches: true,
         clientsClaim: true,

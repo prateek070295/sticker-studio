@@ -45,6 +45,13 @@ export interface ProjectSaveState {
   globalSolidBacking: boolean;
   globalWhiteBacking: boolean;
   patches?: MaskPatch[];
+  projectType?: 'sheet' | 'photo';
+  photoSettings?: {
+    borderThickness: number;
+    previewBg: 'checker' | 'dark' | 'light' | 'saturated';
+    hasRemovedBackground: boolean;
+    viewMode?: 'sticker' | 'artwork' | 'before-after' | 'original';
+  };
 }
 
 export interface LoadedProjectData {
@@ -246,7 +253,9 @@ export async function saveProjectArchive(state: ProjectSaveState): Promise<Blob>
     globalBorderThickness: state.globalBorderThickness,
     globalSolidBacking: state.globalSolidBacking,
     globalWhiteBacking: state.globalWhiteBacking,
-    gridConfig: state.settings.gridConfig
+    gridConfig: state.settings.gridConfig,
+    projectType: state.projectType || 'sheet',
+    photoSettings: state.photoSettings
   };
 
   const entries: ZipEntry[] = [

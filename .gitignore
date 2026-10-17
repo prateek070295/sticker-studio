@@ -11,6 +11,10 @@ build/
 
 # Test and benchmark outputs
 test-output/
+.test-fixtures/
+.photo-review-handoff/
+docs/diagnosis*/
+*.bin
 
 # Logs
 *.log
