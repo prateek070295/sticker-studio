@@ -45,9 +45,44 @@ export function unionBounds(bounds: BoundingBox[]): BoundingBox {
 }
 
 /**
- * Proposes initial sticker groups from detected artwork components.
+ * Proposes initial sticker groups from detected artwork components using canonical raster cavity and pixel proximity.
+ * This is the canonical entry point used by the Web Worker and integration tests.
  */
 export function proposeStickerGroups(
+  components: ArtworkComponent[],
+  proximityThreshold: number = 40,
+  detectTitles: boolean = true,
+  labelMap: Uint16Array,
+  sheetWidth: number,
+  sheetHeight: number
+): StickerGroup[] {
+  return proposeStickerGroupsInternal(
+    components,
+    proximityThreshold,
+    detectTitles,
+    labelMap,
+    sheetWidth,
+    sheetHeight
+  );
+}
+
+/**
+ * Geometric-only fallback for isolated unit tests without raster data.
+ * NOTE: MUST NOT BE USED TO CERTIFY BROWSER BEHAVIOR.
+ */
+export function proposeStickerGroupsGeometricOnly(
+  components: ArtworkComponent[],
+  proximityThreshold: number = 40,
+  detectTitles: boolean = true
+): StickerGroup[] {
+  return proposeStickerGroupsInternal(
+    components,
+    proximityThreshold,
+    detectTitles
+  );
+}
+
+function proposeStickerGroupsInternal(
   components: ArtworkComponent[],
   proximityThreshold: number = 40,
   detectTitles: boolean = true,
@@ -158,10 +193,10 @@ export function proposeStickerGroups(
       const group = assignedGroups[gIdx];
       const isEnclosure = enclosureGroupIndices.has(gIdx);
       // For enclosed badges, only attach satellites that are closely adjacent (e.g. leaves/sparkles <= 15px)
-      // and prevent external wide sheet captions (w >= 40, h <= 14) from attaching to badge
       const allowedThreshold = isEnclosure ? Math.min(15, proximityThreshold * 0.45) : proximityThreshold;
-      const isCaption = small.bounds.width >= 40 && small.bounds.height <= 14;
-      if (isEnclosure && isCaption) continue;
+      // Prevent external wide sheet captions (e.g. w >= 35, h <= 16) from attaching to illustrations as satellites
+      const isCaption = small.bounds.width >= 35 && small.bounds.height <= 16;
+      if (isCaption) continue;
 
       // Find closest component in this group
       for (const memberId of group) {

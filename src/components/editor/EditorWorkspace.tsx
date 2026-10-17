@@ -29,6 +29,7 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
   children
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const contentWrapperRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState<number>(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState<boolean>(false);
@@ -36,15 +37,16 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
 
   // Coordinate projection from screen viewport to sheet pixel space
   const screenToCanvas = useCallback((clientX: number, clientY: number) => {
-    if (!containerRef.current) return { x: 0, y: 0 };
-    const rect = containerRef.current.getBoundingClientRect();
-    const localX = (clientX - rect.left - pan.x) / scale;
-    const localY = (clientY - rect.top - pan.y) / scale;
+    if (!contentWrapperRef.current) return { x: 0, y: 0 };
+    const rect = contentWrapperRef.current.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return { x: 0, y: 0 };
+    const localX = (clientX - rect.left) * (patchBounds.width / rect.width);
+    const localY = (clientY - rect.top) * (patchBounds.height / rect.height);
     return {
-      x: Math.round(patchBounds.x + localX),
-      y: Math.round(patchBounds.y + localY)
+      x: patchBounds.x + localX,
+      y: patchBounds.y + localY
     };
-  }, [pan, scale, patchBounds]);
+  }, [patchBounds]);
 
   // Expose screenToCanvas to parent via ref
   useEffect(() => {
@@ -145,15 +147,19 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
         setIsPanning(false);
         onPointerLeave?.(e);
       }}
-      className={`flex-1 relative overflow-hidden bg-neutral-900 select-none flex items-center justify-center ${
+      className={`flex-1 relative overflow-hidden bg-neutral-900 select-none ${
         toolMode === 'pan' || isPanning ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'
       }`}
     >
       <div
+        ref={contentWrapperRef}
         style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
           transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
           transformOrigin: '0 0',
-          transition: isPanning ? 'none' : 'transform 0.05s ease-out'
+          transition: 'none'
         }}
       >
         {children}

@@ -171,7 +171,7 @@ describe('Component Analysis & Grouping', () => {
     const { components, labelMap } = analyzeComponents(fg, width, height, 5);
     expect(components.length).toBe(3);
 
-    const groups = proposeStickerGroups(components, 35, false);
+    const groups = proposeStickerGroups(components, 35, false, labelMap, width, height);
 
     // Should create exactly 2 sticker groups:
     // Group 1: Main character 1 + sparkle satellite

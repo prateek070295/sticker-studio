@@ -94,7 +94,9 @@ export default function App() {
     splitTouchingComponent,
     updateBackingOverride,
     saveProject,
-    loadProject
+    loadProject,
+    settings,
+    repartitionGrid
   } = useProjectState();
 
   const {
@@ -262,12 +264,14 @@ export default function App() {
               selectedGroupIds={selectedGroupIds}
               globalBorderThickness={globalBorderThickness}
               holes={holes}
+              gridConfig={settings.gridConfig}
               onUpdateGlobalBorder={updateGlobalBorder}
               onUpdateGroupBorder={updateGroupBorder}
               onToggleGroupSetting={toggleGroupSetting}
               onMergeSelected={mergeSelectedGroups}
               onSplitSelected={splitSelectedGroup}
               onToggleExcluded={toggleGroupExcluded}
+              onRepartitionGrid={repartitionGrid}
             />
           </>
         ) : (

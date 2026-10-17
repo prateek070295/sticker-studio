@@ -50,12 +50,33 @@ export interface EnclosedHole {
   removedFromArtwork: boolean;
 }
 
+export interface GridCell {
+  row: number;
+  col: number;
+  cellBounds: BoundingBox;
+  artworkBounds: BoundingBox;
+  captionBounds?: BoundingBox;
+  hasCaption: boolean;
+}
+
+export interface GridSheetConfig {
+  enabled: boolean;
+  columns: number; // e.g. 4
+  rows: number;    // e.g. 5
+  margin: { top: number; right: number; bottom: number; left: number };
+  excludeCaptions: boolean;
+  captionHeightPercent: number; // percentage of cell height reserved for caption, default 15
+  customColDividers?: number[]; // custom X split lines
+  customRowDividers?: number[]; // custom Y split lines
+}
+
 export interface ExtractionSettings {
   bgTolerance: number; // 0 to 100, default 15
   edgeSoftness: number; // 0 to 5, default 1
   minComponentArea: number; // default 20 px
   groupingProximityThreshold: number; // in pixels, default 35
   enableTitleDetection: boolean;
+  gridConfig?: GridSheetConfig;
 }
 
 export type ViewMode = 'sheet' | 'grid';
@@ -161,6 +182,7 @@ export interface ProjectMetadata {
   globalBorderThickness: number;
   globalSolidBacking: boolean;
   globalWhiteBacking: boolean;
+  gridConfig?: GridSheetConfig;
 }
 
 export interface SerializedProject {
@@ -168,6 +190,7 @@ export interface SerializedProject {
   components: ArtworkComponent[];
   groups: StickerGroup[];
   holes: EnclosedHole[];
+  gridConfig?: GridSheetConfig;
   patches?: Array<{
     id: string;
     bounds: BoundingBox;

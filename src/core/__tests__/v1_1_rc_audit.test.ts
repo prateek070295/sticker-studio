@@ -48,7 +48,7 @@ describe('STICKER STUDIO V1.1 — RELEASE CANDIDATE AUDIT SUITE', () => {
       const bgColor = estimateBackgroundColor(rgba, width, height);
       const { alphaMask, foregroundSupport } = segmentForeground(rgba, width, height, bgColor, 18, 1.0);
       const { components, labelMap } = analyzeComponents(foregroundSupport, width, height, 15);
-      const groups = proposeStickerGroups(components, 35, true);
+      const groups = proposeStickerGroups(components, 35, true, labelMap, width, height);
 
       // Verify internal white/cream pixels are opaque (A=255)
       // Check pixels belonging to components where RGB is high
@@ -99,7 +99,7 @@ describe('STICKER STUDIO V1.1 — RELEASE CANDIDATE AUDIT SUITE', () => {
       const bgColor = estimateBackgroundColor(rgba, width, height);
       const { alphaMask, foregroundSupport } = segmentForeground(rgba, width, height, bgColor, 18, 1.0);
       const { components, labelMap } = analyzeComponents(foregroundSupport, width, height, 15);
-      const groups = proposeStickerGroups(components, 35, true);
+      const groups = proposeStickerGroups(components, 35, true, labelMap, width, height);
       expect(groups.length).toBeGreaterThanOrEqual(8);
 
       const compMap = new Map(components.map(c => [c.id, c]));
@@ -119,7 +119,7 @@ describe('STICKER STUDIO V1.1 — RELEASE CANDIDATE AUDIT SUITE', () => {
       const bgColor = estimateBackgroundColor(rgba, width, height);
       const { alphaMask, foregroundSupport } = segmentForeground(rgba, width, height, bgColor, 18, 1.0);
       const { components, labelMap } = analyzeComponents(foregroundSupport, width, height, 15);
-      const groups = proposeStickerGroups(components, 35, true);
+      const groups = proposeStickerGroups(components, 35, true, labelMap, width, height);
       expect(groups.length).toBeGreaterThanOrEqual(8);
 
       const compMap = new Map(components.map(c => [c.id, c]));
@@ -139,7 +139,7 @@ describe('STICKER STUDIO V1.1 — RELEASE CANDIDATE AUDIT SUITE', () => {
       const bgColor = estimateBackgroundColor(rgba, width, height);
       const { alphaMask, foregroundSupport } = segmentForeground(rgba, width, height, bgColor, 18, 1.0);
       const { components, labelMap } = analyzeComponents(foregroundSupport, width, height, 15);
-      const groups = proposeStickerGroups(components, 35, true);
+      const groups = proposeStickerGroups(components, 35, true, labelMap, width, height);
       expect(groups.length).toBeGreaterThanOrEqual(6);
 
       const compMap = new Map(components.map(c => [c.id, c]));
@@ -174,7 +174,7 @@ describe('STICKER STUDIO V1.1 — RELEASE CANDIDATE AUDIT SUITE', () => {
       expect(components.length).toBeGreaterThan(10);
 
       // 4. Propose groups
-      const groups = proposeStickerGroups(components, 35, true);
+      const groups = proposeStickerGroups(components, 35, true, labelMap, width, height);
       expect(groups.length).toBeGreaterThanOrEqual(6);
 
       // Verify chai / teapot / samosa stickers render beautifully with clean white borders

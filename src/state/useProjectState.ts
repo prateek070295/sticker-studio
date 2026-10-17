@@ -14,7 +14,8 @@ import {
   WorkerResponse,
   MaskPatch,
   TouchingSplitRequest,
-  BackingOverride
+  BackingOverride,
+  GridSheetConfig
 } from '../types';
 import { buildGroupDistanceField, compositeSticker } from '../core/composer';
 import { createZip } from '../core/zip';
@@ -22,6 +23,8 @@ import { loadUserPreferences, saveUserPreferences } from './preferences';
 import { applyBrushPatchWithOwnership, OwnershipDiff, revertBrushPatchWithOwnership } from '../core/maskPatch';
 import { commitTouchingSplit, previewTouchingSplit } from '../core/watershedSplit';
 import { loadProjectArchive, saveProjectArchive } from '../core/projectArchive';
+import { computeGridCells, partitionGridComponents, DEFAULT_GRID_CONFIG } from '../core/gridExtractor';
+import { proposeStickerGroups } from '../core/grouping';
 
 interface HistorySnapshot {
   groups: StickerGroup[];
@@ -77,7 +80,8 @@ export function useProjectState() {
     edgeSoftness: 1.0,
     minComponentArea: 15,
     groupingProximityThreshold: 35,
-    enableTitleDetection: true
+    enableTitleDetection: true,
+    gridConfig: DEFAULT_GRID_CONFIG
   });
 
   // Undo / Redo stacks with full structural transactions
@@ -435,6 +439,46 @@ export function useProjectState() {
       prev.map(g => (g.id === groupId ? { ...g, excludedFromExport: !g.excludedFromExport } : g))
     );
   }, [pushHistory]);
+
+  const repartitionGrid = useCallback((configUpdate?: Partial<GridSheetConfig>) => {
+    setSettings(prev => {
+      const currentGrid = prev.gridConfig || DEFAULT_GRID_CONFIG;
+      const updatedGrid: GridSheetConfig = {
+        ...currentGrid,
+        ...(configUpdate || {})
+      };
+      const updatedSettings: ExtractionSettings = {
+        ...prev,
+        gridConfig: updatedGrid
+      };
+
+      if (components.length > 0 && sheetDimensions.width > 0 && sheetDimensions.height > 0) {
+        pushHistory();
+        let newGroups: StickerGroup[];
+        if (updatedGrid.enabled) {
+          const cells = computeGridCells(sheetDimensions.width, sheetDimensions.height, updatedGrid);
+          const partition = partitionGridComponents(components, cells, updatedGrid);
+          newGroups = partition.groups;
+        } else if (labelMap) {
+          newGroups = proposeStickerGroups(
+            components,
+            prev.groupingProximityThreshold,
+            prev.enableTitleDetection,
+            labelMap,
+            sheetDimensions.width,
+            sheetDimensions.height
+          );
+        } else {
+          return updatedSettings;
+        }
+
+        setGroups(newGroups);
+        groupDistanceFieldsRef.current.clear();
+      }
+
+      return updatedSettings;
+    });
+  }, [components, sheetDimensions, labelMap, pushHistory]);
 
   const updateGroupBorder = useCallback((groupId: string, thickness: number) => {
     setGroups(prev =>
@@ -939,6 +983,7 @@ export function useProjectState() {
     confirmRemoveHole,
     keepHole,
     saveProject,
-    loadProject
+    loadProject,
+    repartitionGrid
   };
 }

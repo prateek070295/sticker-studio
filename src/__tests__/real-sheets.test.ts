@@ -55,7 +55,7 @@ describe('Real Kawaii Sticker Sheets Pipeline Verification', () => {
 
     // 4. Grouping
     const tGroup0 = performance.now();
-    const groups = proposeStickerGroups(components, 35, true);
+    const groups = proposeStickerGroups(components, 35, true, labelMap, width, height);
     const groupTime = performance.now() - tGroup0;
     expect(groups.length).toBeGreaterThanOrEqual(10);
 
@@ -135,7 +135,7 @@ describe('Real Kawaii Sticker Sheets Pipeline Verification', () => {
     const bgColor = estimateBackgroundColor(rgba, width, height);
     const { alphaMask, foregroundSupport } = segmentForeground(rgba, width, height, bgColor, 18, 1.0);
     const { components, labelMap } = analyzeComponents(foregroundSupport, width, height, 15);
-    const groups = proposeStickerGroups(components, 35, true);
+    const groups = proposeStickerGroups(components, 35, true, labelMap, width, height);
 
     expect(groups.length).toBeGreaterThan(8);
     const compMap = new Map(components.map(c => [c.id, c]));
@@ -161,7 +161,7 @@ describe('Real Kawaii Sticker Sheets Pipeline Verification', () => {
     const bgColor = estimateBackgroundColor(rgba, width, height);
     const { alphaMask, foregroundSupport } = segmentForeground(rgba, width, height, bgColor, 18, 1.0);
     const { components, labelMap } = analyzeComponents(foregroundSupport, width, height, 15);
-    const groups = proposeStickerGroups(components, 35, true);
+    const groups = proposeStickerGroups(components, 35, true, labelMap, width, height);
 
     expect(groups.length).toBeGreaterThan(8);
     const compMap = new Map(components.map(c => [c.id, c]));
@@ -186,7 +186,7 @@ describe('Real Kawaii Sticker Sheets Pipeline Verification', () => {
     const bgColor = estimateBackgroundColor(rgba, width, height);
     const { alphaMask, foregroundSupport } = segmentForeground(rgba, width, height, bgColor, 18, 1.0);
     const { components, labelMap } = analyzeComponents(foregroundSupport, width, height, 15);
-    const groups = proposeStickerGroups(components, 35, true);
+    const groups = proposeStickerGroups(components, 35, true, labelMap, width, height);
 
     expect(groups.length).toBeGreaterThan(6);
     const compMap = new Map(components.map(c => [c.id, c]));
@@ -211,7 +211,7 @@ describe('Real Kawaii Sticker Sheets Pipeline Verification', () => {
     const bgColor = estimateBackgroundColor(rgba, width, height);
     const { alphaMask, foregroundSupport } = segmentForeground(rgba, width, height, bgColor, 18, 1.0);
     const { components, labelMap } = analyzeComponents(foregroundSupport, width, height, 15);
-    const groups = proposeStickerGroups(components, 35, true);
+    const groups = proposeStickerGroups(components, 35, true, labelMap, width, height);
 
     const compMap = new Map(components.map(c => [c.id, c]));
 

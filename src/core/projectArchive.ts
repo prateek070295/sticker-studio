@@ -189,7 +189,8 @@ export async function saveProjectArchive(state: ProjectSaveState): Promise<Blob>
     settings: state.settings,
     globalBorderThickness: state.globalBorderThickness,
     globalSolidBacking: state.globalSolidBacking,
-    globalWhiteBacking: state.globalWhiteBacking
+    globalWhiteBacking: state.globalWhiteBacking,
+    gridConfig: state.settings.gridConfig
   };
 
   const serializedProject: SerializedProject = {
@@ -197,6 +198,7 @@ export async function saveProjectArchive(state: ProjectSaveState): Promise<Blob>
     components: state.components,
     groups: state.groups,
     holes: state.holes,
+    gridConfig: state.settings.gridConfig,
     patches: state.patches ? state.patches.map(p => ({
       id: p.id,
       bounds: p.bounds,
@@ -216,6 +218,36 @@ export async function saveProjectArchive(state: ProjectSaveState): Promise<Blob>
 }
 
 /**
+ * Scans ZIP local and central directory headers for illegal path traversal filenames (../ or absolute paths)
+ * before JSZip normalizes them away.
+ */
+export function checkZipHeaderPathTraversal(rawBytes: Uint8Array): void {
+  const len = rawBytes.length;
+  for (let i = 0; i < len - 30; i++) {
+    // Local file header magic PK\x03\x04
+    if (rawBytes[i] === 0x50 && rawBytes[i + 1] === 0x4b && rawBytes[i + 2] === 0x03 && rawBytes[i + 3] === 0x04) {
+      const nameLen = rawBytes[i + 26] | (rawBytes[i + 27] << 8);
+      if (nameLen > 0 && i + 30 + nameLen <= len) {
+        const name = new TextDecoder('utf-8', { fatal: false }).decode(rawBytes.subarray(i + 30, i + 30 + nameLen));
+        if (name.includes('..') || name.startsWith('/') || name.startsWith('\\')) {
+          throw new Error(`Security violation: Archive contains illegal path traversal entry "${name}".`);
+        }
+      }
+    }
+    // Central directory file header magic PK\x01\x02
+    if (rawBytes[i] === 0x50 && rawBytes[i + 1] === 0x4b && rawBytes[i + 2] === 0x01 && rawBytes[i + 3] === 0x02) {
+      const nameLen = rawBytes[i + 28] | (rawBytes[i + 29] << 8);
+      if (nameLen > 0 && i + 46 + nameLen <= len) {
+        const name = new TextDecoder('utf-8', { fatal: false }).decode(rawBytes.subarray(i + 46, i + 46 + nameLen));
+        if (name.includes('..') || name.startsWith('/') || name.startsWith('\\')) {
+          throw new Error(`Security violation: Archive contains illegal path traversal entry "${name}".`);
+        }
+      }
+    }
+  }
+}
+
+/**
  * Loads, decompresses, and transactionally validates a .stickerstudio archive.
  * Throws on corruption, invalid checksum, schema mismatch, or path traversal,
  * ensuring the active workspace is never replaced with invalid state.
@@ -225,12 +257,9 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
     throw new Error(`Archive exceeds maximum allowable size (${Math.round(fileOrBlob.size / 1024 / 1024)}MB > ${MAX_ARCHIVE_BYTES / 1024 / 1024}MB limit).`);
   }
 
-  // Pre-scan raw bytes for path traversal before JSZip normalizes entry paths
+  // Pre-scan raw ZIP headers for path traversal before JSZip normalizes entry paths
   const rawBytes = fileOrBlob instanceof Uint8Array ? fileOrBlob : new Uint8Array(await fileOrBlob.arrayBuffer());
-  const rawHeaderStr = new TextDecoder('utf-8', { fatal: false }).decode(rawBytes);
-  if (rawHeaderStr.includes('../') || rawHeaderStr.includes('..\\')) {
-    throw new Error('Security violation: Archive contains illegal path traversal entry.');
-  }
+  checkZipHeaderPathTraversal(rawBytes);
 
   const zip = new JSZip();
   let uncompressedTotalBytes = 0;

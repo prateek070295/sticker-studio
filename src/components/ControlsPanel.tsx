@@ -8,15 +8,17 @@ import {
   EyeOff,
   Split,
   AlertTriangle,
-  RotateCcw
+  RotateCcw,
+  Grid
 } from 'lucide-react';
-import { EnclosedHole, StickerGroup } from '../types';
+import { EnclosedHole, GridSheetConfig, StickerGroup } from '../types';
 
 interface ControlsPanelProps {
   groups: StickerGroup[];
   selectedGroupIds: string[];
   globalBorderThickness: number;
   holes: EnclosedHole[];
+  gridConfig?: GridSheetConfig;
   onUpdateGlobalBorder: (val: number) => void;
   onUpdateGroupBorder: (groupId: string, val: number) => void;
   onToggleGroupSetting: (
@@ -26,6 +28,7 @@ interface ControlsPanelProps {
   onMergeSelected: () => void;
   onSplitSelected: () => void;
   onToggleExcluded: (groupId: string) => void;
+  onRepartitionGrid?: (config?: Partial<GridSheetConfig>) => void;
 }
 
 export const ControlsPanel: React.FC<ControlsPanelProps> = ({
@@ -33,12 +36,14 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
   selectedGroupIds,
   globalBorderThickness,
   holes,
+  gridConfig,
   onUpdateGlobalBorder,
   onUpdateGroupBorder,
   onToggleGroupSetting,
   onMergeSelected,
   onSplitSelected,
-  onToggleExcluded
+  onToggleExcluded,
+  onRepartitionGrid
 }) => {
   const selectedGroup =
     selectedGroupIds.length === 1 ? groups.find(g => g.id === selectedGroupIds[0]) : null;
@@ -185,6 +190,71 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
               className="accent-pink-600 w-4 h-4 rounded cursor-pointer"
             />
           </label>
+        </div>
+
+        {/* Contact Sheet / Grid Mode */}
+        <div className="flex flex-col gap-3 pt-2 border-t border-neutral-100">
+          <div className="flex items-center justify-between">
+            <h3 className="text-[11px] font-bold uppercase tracking-wider text-neutral-500 flex items-center gap-1.5">
+              <Grid className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Contact Sheet / Grid</span>
+            </h3>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={gridConfig?.enabled || false}
+                onChange={e => onRepartitionGrid?.({ enabled: e.target.checked })}
+                className="accent-indigo-600 w-4 h-4 rounded cursor-pointer"
+              />
+              <span className="text-xs font-semibold text-neutral-700">Grid Mode</span>
+            </label>
+          </div>
+
+          {gridConfig?.enabled && (
+            <div className="flex flex-col gap-2.5 p-3 rounded-lg bg-indigo-50/60 border border-indigo-100 text-xs">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[11px] font-semibold text-neutral-700 block mb-1">Columns</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="12"
+                    value={gridConfig.columns}
+                    onChange={e => onRepartitionGrid?.({ columns: Math.max(1, parseInt(e.target.value) || 1) })}
+                    className="w-full px-2 py-1 bg-white border border-neutral-300 rounded text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] font-semibold text-neutral-700 block mb-1">Rows</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="12"
+                    value={gridConfig.rows}
+                    onChange={e => onRepartitionGrid?.({ rows: Math.max(1, parseInt(e.target.value) || 1) })}
+                    className="w-full px-2 py-1 bg-white border border-neutral-300 rounded text-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              <label className="flex items-center gap-2 cursor-pointer mt-1">
+                <input
+                  type="checkbox"
+                  checked={gridConfig.excludeCaptions}
+                  onChange={e => onRepartitionGrid?.({ excludeCaptions: e.target.checked })}
+                  className="accent-indigo-600 w-3.5 h-3.5 rounded"
+                />
+                <span className="text-[11px] text-neutral-700 font-medium">Exclude Caption Bands</span>
+              </label>
+
+              <button
+                onClick={() => onRepartitionGrid?.()}
+                className="w-full py-1.5 px-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-xs font-medium transition cursor-pointer shadow-xs"
+              >
+                Repartition Grid ({gridConfig.columns}×{gridConfig.rows})
+              </button>
+            </div>
+          )}
         </div>
 
         {/* 3. Group Selection Actions */}

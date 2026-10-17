@@ -29,7 +29,7 @@ describe('Phase 1 — Reproduce and Diagnose Chai Break Grouping Defects', () =>
     const bgColor = estimateBackgroundColor(rgba, width, height);
     const { alphaMask, foregroundSupport } = segmentForeground(rgba, width, height, bgColor, 18, 1.0);
     const { components, labelMap } = analyzeComponents(foregroundSupport, width, height, 15);
-    const groups = proposeStickerGroups(components, 35, true);
+    const groups = proposeStickerGroups(components, 35, true, labelMap, width, height);
 
     console.log(`\n=== CHAI BREAK DIAGNOSTIC SUMMARY ===`);
     console.log(`Image Size: ${width}x${height}`);
@@ -122,8 +122,8 @@ describe('Phase 1 — Reproduce and Diagnose Chai Break Grouping Defects', () =>
       }
     }
 
-    const { components } = analyzeComponents(hollowSupport, width, height, 15);
-    const groups = proposeStickerGroups(components, 35, true);
+    const { components, labelMap: hollowLabelMap } = analyzeComponents(hollowSupport, width, height, 15);
+    const groups = proposeStickerGroups(components, 35, true, hollowLabelMap, width, height);
 
     console.log(`With holes removed: components=${components.length}, groups=${groups.length}`);
 

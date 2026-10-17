@@ -8,6 +8,7 @@ import { estimateBackgroundColor } from '../core/color';
 import { segmentForeground } from '../core/segmentation';
 import { analyzeComponents } from '../core/components';
 import { proposeStickerGroups } from '../core/grouping';
+import { computeGridCells, partitionGridComponents } from '../core/gridExtractor';
 import { computeEuclideanDistanceTransform } from '../core/edt';
 import { WorkerRequest, WorkerResponse } from '../types';
 
@@ -77,14 +78,21 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
         }
       } as WorkerResponse);
 
-      const suggestedGroups = proposeStickerGroups(
-        components,
-        settings.groupingProximityThreshold,
-        settings.enableTitleDetection,
-        labelMap,
-        width,
-        height
-      );
+      let suggestedGroups;
+      if (settings.gridConfig && settings.gridConfig.enabled) {
+        const cells = computeGridCells(width, height, settings.gridConfig);
+        const partition = partitionGridComponents(components, cells, settings.gridConfig);
+        suggestedGroups = partition.groups;
+      } else {
+        suggestedGroups = proposeStickerGroups(
+          components,
+          settings.groupingProximityThreshold,
+          settings.enableTitleDetection,
+          labelMap,
+          width,
+          height
+        );
+      }
 
       const holes = enclosedHoleCandidates.map((c, i) => ({
         id: c.id,

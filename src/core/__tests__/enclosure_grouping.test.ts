@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { ArtworkComponent } from '../../types';
 import { isComponentEnclosed, detectEnclosures } from '../enclosure';
-import { proposeStickerGroups } from '../grouping';
+import { proposeStickerGroupsGeometricOnly } from '../grouping';
 
 describe('Enclosure-Aware Sticker Grouping Unit Tests', () => {
 
@@ -81,7 +81,7 @@ describe('Enclosure-Aware Sticker Grouping Unit Tests', () => {
     expect(enclosedIds.size).toBe(5);
 
     // Grouping must unify all 6 pieces into exactly 1 sticker group
-    const groups = proposeStickerGroups(components, 35, true);
+    const groups = proposeStickerGroupsGeometricOnly(components, 35, true);
     expect(groups.length).toBe(1);
 
     const badgeGroup = groups[0];
@@ -133,7 +133,7 @@ describe('Enclosure-Aware Sticker Grouping Unit Tests', () => {
     };
 
     const components = [ring, centerCup, caption];
-    const groups = proposeStickerGroups(components, 35, true);
+    const groups = proposeStickerGroupsGeometricOnly(components, 35, true);
 
     // Should create 2 distinct groups: 1 for the badge, 1 for the caption
     expect(groups.length).toBe(2);
@@ -182,7 +182,7 @@ describe('Enclosure-Aware Sticker Grouping Unit Tests', () => {
     };
 
     const components = [badge1Ring, b1Inner, badge2Ring, b2Inner];
-    const groups = proposeStickerGroups(components, 35, true);
+    const groups = proposeStickerGroupsGeometricOnly(components, 35, true);
 
     expect(groups.length).toBe(2);
 
@@ -221,7 +221,7 @@ describe('Enclosure-Aware Sticker Grouping Unit Tests', () => {
     };
 
     const components = [word1, word2, word3];
-    const groups = proposeStickerGroups(components, 35, true);
+    const groups = proposeStickerGroupsGeometricOnly(components, 35, true);
 
     expect(groups.length).toBe(1);
     expect(groups[0].componentIds).toHaveLength(3);
@@ -250,7 +250,7 @@ describe('Enclosure-Aware Sticker Grouping Unit Tests', () => {
     };
 
     const components = [mainCharacter, heart];
-    const groups = proposeStickerGroups(components, 35, true);
+    const groups = proposeStickerGroupsGeometricOnly(components, 35, true);
 
     expect(groups.length).toBe(1);
     const grp = groups[0];
