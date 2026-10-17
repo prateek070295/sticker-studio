@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { saveProjectArchive, loadProjectArchive, ProjectSaveState } from '../projectArchive';
 import { ArtworkComponent, StickerGroup, ExtractionSettings, GridSheetConfig } from '../../types';
+import { buildGroupDistanceField, compositeSticker } from '../composer';
 
 describe('Exact Project Persistence Regression Test', () => {
   it('persists and restores exact alpha mask, ownership label map, split regions, and backing corrections', async () => {
@@ -262,5 +263,210 @@ describe('Exact Project Persistence Regression Test', () => {
       /Legacy v1 project archives lack exact mask and ownership data and cannot be safely restored without workspace damage/
     );
   });
+
+  it('persists and restores BackingOverride with painted addedMask and removedMask typed arrays', async () => {
+    const width = 100;
+    const height = 100;
+    const size = width * height;
+
+    const rgba = new Uint8ClampedArray(size * 4);
+    // Fill background with white, alpha 255
+    for (let i = 0; i < size; i++) {
+      rgba[i * 4] = 255;
+      rgba[i * 4 + 1] = 255;
+      rgba[i * 4 + 2] = 255;
+      rgba[i * 4 + 3] = 255;
+    }
+
+    // Component 1: black artwork square at [30, 30, 40, 40]
+    const alphaMask = new Uint8Array(size);
+    const labelMap = new Uint16Array(size);
+
+    for (let y = 30; y < 70; y++) {
+      for (let x = 30; x < 70; x++) {
+        const idx = y * width + x;
+        alphaMask[idx] = 255;
+        labelMap[idx] = 1;
+        // Make artwork black
+        rgba[idx * 4] = 20;
+        rgba[idx * 4 + 1] = 20;
+        rgba[idx * 4 + 2] = 20;
+      }
+    }
+
+    const sourceImage = {
+      data: rgba,
+      width,
+      height,
+      colorSpace: 'srgb' as PredefinedColorSpace
+    } as ImageData;
+
+    const components: ArtworkComponent[] = [
+      {
+        id: 'comp_1',
+        label: 1,
+        pixelCount: 1600,
+        bounds: { x: 30, y: 30, width: 40, height: 40 },
+        centroid: { x: 50, y: 50 },
+        isTiny: false
+      }
+    ];
+
+    const compMap = new Map<string, ArtworkComponent>();
+    compMap.set('comp_1', components[0]);
+
+    // Padding = 10 -> localWidth = 40 + 20 = 60, localHeight = 60
+    // patchBounds = { x: 20, y: 20, width: 60, height: 60 }
+    // localSize = 3600
+    const padding = 10;
+    const localW = 60;
+    const localH = 60;
+    const localSize = localW * localH;
+    const patchBounds = { x: 20, y: 20, width: localW, height: localH };
+
+    // Baseline group WITHOUT painted backing overrides
+    const baseGroup: StickerGroup = {
+      id: 'group_test',
+      name: 'sticker_test',
+      componentIds: ['comp_1'],
+      bounds: { x: 30, y: 30, width: 40, height: 40 },
+      borderThickness: 5,
+      customBorder: true,
+      whiteBackingEnabled: true,
+      connectBacking: false,
+      solidBacking: false,
+      bridges: [],
+      excludedFromExport: false
+    };
+
+    const baseDf = buildGroupDistanceField(baseGroup, compMap, labelMap, width, height, padding);
+    const baseExport = compositeSticker(
+      baseGroup,
+      compMap,
+      labelMap,
+      alphaMask,
+      rgba,
+      width,
+      height,
+      baseDf.distField,
+      baseDf.patchBounds,
+      baseGroup.borderThickness,
+      0
+    );
+
+    // Create painted masks:
+    // 1. addedMask: visibly adds white backing outside the base silhouette (at local x: 0..8, y: 0..8)
+    const addedMask = new Uint8Array(localSize);
+    for (let ly = 0; ly < 8; ly++) {
+      for (let lx = 0; lx < 8; lx++) {
+        addedMask[ly * localW + lx] = 1;
+      }
+    }
+
+    // 2. removedMask: visibly removes white backing from a region inside the silhouette (at local x: 25..35, y: 25..35)
+    const removedMask = new Uint8Array(localSize);
+    for (let ly = 25; ly < 35; ly++) {
+      for (let lx = 25; lx < 35; lx++) {
+        removedMask[ly * localW + lx] = 1;
+      }
+    }
+
+    const groupWithOverrides: StickerGroup = {
+      ...baseGroup,
+      backingOverride: {
+        groupId: 'group_test',
+        bounds: patchBounds,
+        addedMask,
+        removedMask,
+        smoothingRadius: 2
+      }
+    };
+
+    const preSaveDf = buildGroupDistanceField(groupWithOverrides, compMap, labelMap, width, height, padding);
+    const preSaveExport = compositeSticker(
+      groupWithOverrides,
+      compMap,
+      labelMap,
+      alphaMask,
+      rgba,
+      width,
+      height,
+      preSaveDf.distField,
+      preSaveDf.patchBounds,
+      groupWithOverrides.borderThickness,
+      0
+    );
+
+    // Verify preSaveExport is visibly DIFFERENT from baseExport:
+    // In added region (e.g. lx: 2, ly: 2): preSaveExport has white backing (alpha 255)
+    expect(preSaveExport.croppedRgba).not.toEqual(baseExport.croppedRgba);
+
+    // Save project
+    const saveState: ProjectSaveState = {
+      name: 'backing_override_test',
+      sourceImage,
+      alphaMask,
+      labelMap,
+      settings: {
+        bgTolerance: 15,
+        edgeSoftness: 1,
+        minComponentArea: 10,
+        groupingProximityThreshold: 35,
+        enableTitleDetection: false
+      },
+      components,
+      groups: [groupWithOverrides],
+      holes: [],
+      globalBorderThickness: 5,
+      globalSolidBacking: true,
+      globalWhiteBacking: true
+    };
+
+    const archiveBlob = await saveProjectArchive(saveState);
+    const loaded = await loadProjectArchive(archiveBlob);
+
+    const loadedGroup = loaded.groups.find(g => g.id === 'group_test')!;
+    expect(loadedGroup).toBeDefined();
+    expect(loadedGroup.backingOverride).toBeDefined();
+
+    // 1. Verify actual Uint8Array types and values
+    expect(loadedGroup.backingOverride?.addedMask).toBeInstanceOf(Uint8Array);
+    expect(loadedGroup.backingOverride?.removedMask).toBeInstanceOf(Uint8Array);
+    expect(loadedGroup.backingOverride?.addedMask).toEqual(addedMask);
+    expect(loadedGroup.backingOverride?.removedMask).toEqual(removedMask);
+
+    // 2. Verify mask dimensions and coordinate bounds
+    expect(loadedGroup.backingOverride?.bounds).toEqual(patchBounds);
+
+    // 3. Verify unchanged artwork alpha and ownership
+    expect(loaded.alphaMask).toEqual(alphaMask);
+    expect(loaded.labelMap).toEqual(labelMap);
+
+    // 4. Verify identical rendered backing distance field
+    const loadedCompMap = new Map<string, ArtworkComponent>();
+    for (const c of loaded.components) loadedCompMap.set(c.id, c);
+
+    const postLoadDf = buildGroupDistanceField(loadedGroup, loadedCompMap, loaded.labelMap, width, height, padding);
+    expect(postLoadDf.distField).toEqual(preSaveDf.distField);
+
+    // 5. Verify identical decoded white-backed export pixels
+    const postLoadExport = compositeSticker(
+      loadedGroup,
+      loadedCompMap,
+      loaded.labelMap,
+      loaded.alphaMask,
+      loaded.sourceImage.data,
+      width,
+      height,
+      postLoadDf.distField,
+      postLoadDf.patchBounds,
+      loadedGroup.borderThickness,
+      0
+    );
+
+    expect(postLoadExport.croppedRgba).toEqual(preSaveExport.croppedRgba);
+    expect(postLoadExport.croppedRgba).not.toEqual(baseExport.croppedRgba);
+  });
 });
+
 

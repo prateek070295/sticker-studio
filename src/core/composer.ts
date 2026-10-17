@@ -124,15 +124,51 @@ export function buildGroupDistanceField(
 
   // 2. Apply manual backing overrides (additions and subtractions)
   if (group.backingOverride) {
-    const { addedMask, removedMask } = group.backingOverride;
-    if (addedMask && addedMask.length === localSize) {
-      for (let i = 0; i < localSize; i++) {
-        if (addedMask[i] === 1) binarySeed[i] = 1;
+    const { addedMask, removedMask, bounds: overrideBounds } = group.backingOverride;
+    if (addedMask) {
+      if (addedMask.length === localSize) {
+        for (let i = 0; i < localSize; i++) {
+          if (addedMask[i] === 1) binarySeed[i] = 1;
+        }
+      } else if (overrideBounds && addedMask.length === overrideBounds.width * overrideBounds.height) {
+        for (let oy = 0; oy < overrideBounds.height; oy++) {
+          const sy = overrideBounds.y + oy;
+          const ly = sy - minY;
+          if (ly >= 0 && ly < localHeight) {
+            for (let ox = 0; ox < overrideBounds.width; ox++) {
+              const sx = overrideBounds.x + ox;
+              const lx = sx - minX;
+              if (lx >= 0 && lx < localWidth) {
+                if (addedMask[oy * overrideBounds.width + ox] === 1) {
+                  binarySeed[ly * localWidth + lx] = 1;
+                }
+              }
+            }
+          }
+        }
       }
     }
-    if (removedMask && removedMask.length === localSize) {
-      for (let i = 0; i < localSize; i++) {
-        if (removedMask[i] === 1) binarySeed[i] = 0;
+    if (removedMask) {
+      if (removedMask.length === localSize) {
+        for (let i = 0; i < localSize; i++) {
+          if (removedMask[i] === 1) binarySeed[i] = 0;
+        }
+      } else if (overrideBounds && removedMask.length === overrideBounds.width * overrideBounds.height) {
+        for (let oy = 0; oy < overrideBounds.height; oy++) {
+          const sy = overrideBounds.y + oy;
+          const ly = sy - minY;
+          if (ly >= 0 && ly < localHeight) {
+            for (let ox = 0; ox < overrideBounds.width; ox++) {
+              const sx = overrideBounds.x + ox;
+              const lx = sx - minX;
+              if (lx >= 0 && lx < localWidth) {
+                if (removedMask[oy * overrideBounds.width + ox] === 1) {
+                  binarySeed[ly * localWidth + lx] = 0;
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

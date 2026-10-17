@@ -12,6 +12,7 @@
 import JSZip from 'jszip';
 import {
   ArtworkComponent,
+  BackingOverride,
   EnclosedHole,
   ExtractionSettings,
   MaskPatch,
@@ -248,10 +249,42 @@ export async function saveProjectArchive(state: ProjectSaveState): Promise<Blob>
     gridConfig: state.settings.gridConfig
   };
 
+  const entries: ZipEntry[] = [
+    { name: 'source.png', data: pngBytes },
+    { name: 'alpha_mask.bin', data: alphaMask },
+    { name: 'label_map.bin', data: labelBytes }
+  ];
+
+  const serializedGroups = state.groups.map(group => {
+    if (!group.backingOverride) return group;
+    const bo = group.backingOverride;
+    const serializedBo: Record<string, any> = {
+      groupId: bo.groupId,
+      bounds: bo.bounds,
+      smoothingRadius: bo.smoothingRadius
+    };
+    if (bo.addedMask && bo.addedMask.length > 0) {
+      const entryName = `backing_masks/${group.id}_added.bin`;
+      entries.push({ name: entryName, data: new Uint8Array(bo.addedMask) });
+      serializedBo.addedMaskEntry = entryName;
+      serializedBo.addedMaskLength = bo.addedMask.length;
+    }
+    if (bo.removedMask && bo.removedMask.length > 0) {
+      const entryName = `backing_masks/${group.id}_removed.bin`;
+      entries.push({ name: entryName, data: new Uint8Array(bo.removedMask) });
+      serializedBo.removedMaskEntry = entryName;
+      serializedBo.removedMaskLength = bo.removedMask.length;
+    }
+    return {
+      ...group,
+      backingOverride: serializedBo as BackingOverride
+    };
+  });
+
   const serializedProject: SerializedProject = {
     metadata,
     components: state.components,
-    groups: state.groups,
+    groups: serializedGroups,
     holes: state.holes,
     gridConfig: state.settings.gridConfig,
     patches: state.patches ? state.patches.map(p => ({
@@ -263,13 +296,7 @@ export async function saveProjectArchive(state: ProjectSaveState): Promise<Blob>
   };
 
   const projectJsonBytes = new TextEncoder().encode(JSON.stringify(serializedProject, null, 2));
-
-  const entries: ZipEntry[] = [
-    { name: 'project.json', data: projectJsonBytes },
-    { name: 'source.png', data: pngBytes },
-    { name: 'alpha_mask.bin', data: alphaMask },
-    { name: 'label_map.bin', data: labelBytes }
-  ];
+  entries.unshift({ name: 'project.json', data: projectJsonBytes });
 
   return createZip(entries);
 }
@@ -484,6 +511,54 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
     sourceImage.height !== serialized.metadata.imageDimensions.height
   ) {
     throw new Error(`Dimension mismatch: Image dimensions (${sourceImage.width}x${sourceImage.height}) do not match project metadata (${serialized.metadata.imageDimensions.width}x${serialized.metadata.imageDimensions.height}).`);
+  }
+
+  // 11. Reconstruct backing override masks as validated Uint8Array instances
+  for (const group of serialized.groups || []) {
+    if (group.backingOverride) {
+      const bo: any = group.backingOverride;
+      if (bo.addedMaskEntry) {
+        if (bo.addedMaskEntry.includes('..') || bo.addedMaskEntry.startsWith('/') || bo.addedMaskEntry.startsWith('\\')) {
+          throw new Error(`Security violation: Illegal entry path "${bo.addedMaskEntry}".`);
+        }
+        const file = loadedZip.file(bo.addedMaskEntry);
+        if (!file) {
+          throw new Error(`Invalid .stickerstudio archive: missing backing mask entry "${bo.addedMaskEntry}".`);
+        }
+        const maskBytes = await file.async('uint8array');
+        if (maskBytes.length > MAX_PER_ENTRY_BYTES) {
+          throw new Error(`Per-entry size budget exceeded: ${bo.addedMaskEntry} exceeds ${MAX_PER_ENTRY_BYTES / 1024 / 1024}MB limit.`);
+        }
+        uncompressedTotalBytes += maskBytes.length;
+        if (bo.bounds && maskBytes.length !== bo.bounds.width * bo.bounds.height) {
+          throw new Error(`Corrupted backing mask: ${bo.addedMaskEntry} length (${maskBytes.length}) does not match bounds dimensions (${bo.bounds.width * bo.bounds.height}).`);
+        }
+        bo.addedMask = new Uint8Array(maskBytes);
+      } else if (bo.addedMask && !(bo.addedMask instanceof Uint8Array)) {
+        bo.addedMask = new Uint8Array(Object.values(bo.addedMask).map(Number));
+      }
+
+      if (bo.removedMaskEntry) {
+        if (bo.removedMaskEntry.includes('..') || bo.removedMaskEntry.startsWith('/') || bo.removedMaskEntry.startsWith('\\')) {
+          throw new Error(`Security violation: Illegal entry path "${bo.removedMaskEntry}".`);
+        }
+        const file = loadedZip.file(bo.removedMaskEntry);
+        if (!file) {
+          throw new Error(`Invalid .stickerstudio archive: missing backing mask entry "${bo.removedMaskEntry}".`);
+        }
+        const maskBytes = await file.async('uint8array');
+        if (maskBytes.length > MAX_PER_ENTRY_BYTES) {
+          throw new Error(`Per-entry size budget exceeded: ${bo.removedMaskEntry} exceeds ${MAX_PER_ENTRY_BYTES / 1024 / 1024}MB limit.`);
+        }
+        uncompressedTotalBytes += maskBytes.length;
+        if (bo.bounds && maskBytes.length !== bo.bounds.width * bo.bounds.height) {
+          throw new Error(`Corrupted backing mask: ${bo.removedMaskEntry} length (${maskBytes.length}) does not match bounds dimensions (${bo.bounds.width * bo.bounds.height}).`);
+        }
+        bo.removedMask = new Uint8Array(maskBytes);
+      } else if (bo.removedMask && !(bo.removedMask instanceof Uint8Array)) {
+        bo.removedMask = new Uint8Array(Object.values(bo.removedMask).map(Number));
+      }
+    }
   }
 
   // Transactionally validated and ready for hydration
