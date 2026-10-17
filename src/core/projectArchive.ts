@@ -21,7 +21,7 @@ import {
 } from '../types';
 import { createZip, ZipEntry } from './zip';
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 export const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024; // 100 MB max compressed archive
 export const MAX_UNCOMPRESSED_TOTAL_BYTES = 250 * 1024 * 1024; // 250 MB total uncompressed budget
 export const MAX_PER_ENTRY_BYTES = 150 * 1024 * 1024; // 150 MB per single entry
@@ -34,6 +34,8 @@ export const MAX_IMAGE_ALLOCATION_BYTES = 256 * 1024 * 1024; // 256 MB RGBA buff
 export interface ProjectSaveState {
   name: string;
   sourceImage: ImageData;
+  alphaMask?: Uint8Array;
+  labelMap?: Uint16Array;
   settings: ExtractionSettings;
   components: ArtworkComponent[];
   groups: StickerGroup[];
@@ -50,6 +52,8 @@ export interface LoadedProjectData {
   components: ArtworkComponent[];
   groups: StickerGroup[];
   holes: EnclosedHole[];
+  alphaMask: Uint8Array;
+  labelMap: Uint16Array;
   patches?: MaskPatch[];
 }
 
@@ -175,6 +179,42 @@ export async function saveProjectArchive(state: ProjectSaveState): Promise<Blob>
   const pngBytes = await imageDataToPngBytes(state.sourceImage);
   const sourceSha256 = await computeSha256(pngBytes);
 
+  const width = state.sourceImage.width;
+  const height = state.sourceImage.height;
+  const pixelCount = width * height;
+
+  // Prepare exact alphaMask payload
+  let alphaMask: Uint8Array;
+  if (state.alphaMask) {
+    if (state.alphaMask.length !== pixelCount) {
+      throw new Error(`Invalid alphaMask size: expected ${pixelCount}, got ${state.alphaMask.length}`);
+    }
+    alphaMask = state.alphaMask;
+  } else {
+    alphaMask = new Uint8Array(pixelCount);
+    for (let i = 0; i < pixelCount; i++) {
+      alphaMask[i] = state.sourceImage.data[i * 4 + 3];
+    }
+  }
+
+  // Prepare exact labelMap payload (little-endian Uint16)
+  let labelMap: Uint16Array;
+  if (state.labelMap) {
+    if (state.labelMap.length !== pixelCount) {
+      throw new Error(`Invalid labelMap size: expected ${pixelCount}, got ${state.labelMap.length}`);
+    }
+    labelMap = state.labelMap;
+  } else {
+    labelMap = new Uint16Array(pixelCount);
+  }
+
+  const labelBuffer = new ArrayBuffer(pixelCount * 2);
+  const labelView = new DataView(labelBuffer);
+  for (let i = 0; i < pixelCount; i++) {
+    labelView.setUint16(i * 2, labelMap[i], true); // little-endian
+  }
+  const labelBytes = new Uint8Array(labelBuffer);
+
   const metadata: ProjectMetadata = {
     version: '1.1',
     schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -183,8 +223,23 @@ export async function saveProjectArchive(state: ProjectSaveState): Promise<Blob>
     name: state.name || 'Untitled Sticker Project',
     sourceSha256,
     imageDimensions: {
-      width: state.sourceImage.width,
-      height: state.sourceImage.height
+      width,
+      height
+    },
+    maskMetadata: {
+      alphaMask: {
+        fileName: 'alpha_mask.bin',
+        format: 'uint8',
+        bytesPerElement: 1,
+        byteLength: pixelCount
+      },
+      labelMap: {
+        fileName: 'label_map.bin',
+        format: 'uint16',
+        bytesPerElement: 2,
+        byteOrder: 'little-endian',
+        byteLength: pixelCount * 2
+      }
     },
     settings: state.settings,
     globalBorderThickness: state.globalBorderThickness,
@@ -211,7 +266,9 @@ export async function saveProjectArchive(state: ProjectSaveState): Promise<Blob>
 
   const entries: ZipEntry[] = [
     { name: 'project.json', data: projectJsonBytes },
-    { name: 'source.png', data: pngBytes }
+    { name: 'source.png', data: pngBytes },
+    { name: 'alpha_mask.bin', data: alphaMask },
+    { name: 'label_map.bin', data: labelBytes }
   ];
 
   return createZip(entries);
@@ -300,6 +357,9 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
   }
 
   // 3. Schema version verification
+  if (serialized.metadata?.schemaVersion === 1) {
+    throw new Error('Legacy v1 project archives lack exact mask and ownership data and cannot be safely restored without workspace damage. Please re-import the original image.');
+  }
   if (!serialized.metadata || serialized.metadata.schemaVersion !== CURRENT_SCHEMA_VERSION) {
     throw new Error(`Incompatible project schema version: expected ${CURRENT_SCHEMA_VERSION}, received ${serialized.metadata?.schemaVersion}.`);
   }
@@ -322,11 +382,13 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
 
   // 5. Referential Integrity Validation (validate object graph before expensive image decoding)
   const compIdSet = new Set<string>();
+  const validComponentLabels = new Set<number>();
   for (const comp of serialized.components || []) {
     if (!comp.id || typeof comp.label !== 'number' || comp.label <= 0) {
       throw new Error(`Invalid component metadata: Component "${comp?.id}" has an invalid label or identifier.`);
     }
     compIdSet.add(comp.id);
+    validComponentLabels.add(comp.label);
   }
 
   const claimedCompIds = new Set<string>();
@@ -345,7 +407,46 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
     }
   }
 
-  // 6. Validate source.png presence, per-entry size, and cumulative decompression budget
+  // 6. Validate alpha_mask.bin presence and size
+  const alphaFile = loadedZip.file('alpha_mask.bin');
+  if (!alphaFile) {
+    throw new Error('Invalid .stickerstudio archive: missing alpha_mask.bin payload.');
+  }
+  const alphaBytes = await alphaFile.async('uint8array');
+  if (alphaBytes.length > MAX_PER_ENTRY_BYTES) {
+    throw new Error(`Per-entry size budget exceeded: alpha_mask.bin (${Math.round(alphaBytes.length / 1024 / 1024)}MB) exceeds ${MAX_PER_ENTRY_BYTES / 1024 / 1024}MB limit.`);
+  }
+  if (alphaBytes.length !== pixelCount) {
+    throw new Error(`Corrupted alpha_mask.bin: expected ${pixelCount} bytes, got ${alphaBytes.length}.`);
+  }
+  uncompressedTotalBytes += alphaBytes.length;
+  const alphaMask = new Uint8Array(alphaBytes);
+
+  // 7. Validate label_map.bin presence, size, and decode little-endian Uint16
+  const labelFile = loadedZip.file('label_map.bin');
+  if (!labelFile) {
+    throw new Error('Invalid .stickerstudio archive: missing label_map.bin payload.');
+  }
+  const labelBytes = await labelFile.async('uint8array');
+  if (labelBytes.length > MAX_PER_ENTRY_BYTES) {
+    throw new Error(`Per-entry size budget exceeded: label_map.bin (${Math.round(labelBytes.length / 1024 / 1024)}MB) exceeds ${MAX_PER_ENTRY_BYTES / 1024 / 1024}MB limit.`);
+  }
+  if (labelBytes.length !== pixelCount * 2) {
+    throw new Error(`Corrupted label_map.bin: expected ${pixelCount * 2} bytes, got ${labelBytes.length}.`);
+  }
+  uncompressedTotalBytes += labelBytes.length;
+
+  const labelMap = new Uint16Array(pixelCount);
+  const labelView = new DataView(labelBytes.buffer, labelBytes.byteOffset, labelBytes.byteLength);
+  for (let i = 0; i < pixelCount; i++) {
+    const lbl = labelView.getUint16(i * 2, true); // little-endian
+    if (lbl !== 0 && !validComponentLabels.has(lbl)) {
+      throw new Error(`Referential integrity error: labelMap contains label ${lbl} not assigned to any component.`);
+    }
+    labelMap[i] = lbl;
+  }
+
+  // 8. Validate source.png presence, per-entry size, and cumulative decompression budget
   const sourceFile = loadedZip.file('source.png');
   if (!sourceFile) {
     throw new Error('Invalid .stickerstudio archive: missing source.png image asset.');
@@ -369,13 +470,13 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
     }
   }
 
-  // 7. Source image SHA-256 integrity verification
+  // 9. Source image SHA-256 integrity verification
   const calculatedSha256 = await computeSha256(sourceBytes);
   if (serialized.metadata.sourceSha256 && calculatedSha256 !== serialized.metadata.sourceSha256) {
     throw new Error(`Integrity check failed: source.png SHA-256 checksum mismatch (expected ${serialized.metadata.sourceSha256}, got ${calculatedSha256}).`);
   }
 
-  // 8. Decode source image
+  // 10. Decode source image
   const sourceImage = await pngBytesToImageData(sourceBytes);
 
   if (
@@ -391,6 +492,8 @@ export async function loadProjectArchive(fileOrBlob: File | Blob): Promise<Loade
     sourceImage,
     components: serialized.components || [],
     groups: serialized.groups || [],
-    holes: serialized.holes || []
+    holes: serialized.holes || [],
+    alphaMask,
+    labelMap
   };
 }

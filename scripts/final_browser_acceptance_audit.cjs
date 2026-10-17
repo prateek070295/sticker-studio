@@ -699,6 +699,41 @@ async function runBrowserAcceptanceCheck() {
     // STEP 8: Real Project Round-Trip (Save Project & Open Project)
     // -------------------------------------------------------------------------
     console.log('\n--- STEP 8: Real Project Round-Trip (UI Save & Open Project) ---');
+
+    // 1. Export post-edit reference PNGs (both white-backed and artwork-only) BEFORE saving
+    const card17PreSave = page.locator('div.relative:has-text("sticker_017")');
+    console.log('Exporting post-edit white-backed reference for sticker_017...');
+    const [preSaveWhiteDownload] = await Promise.all([
+      page.waitForEvent('download', { timeout: 30000 }),
+      card17PreSave.locator('button[title*="Export"]').click()
+    ]);
+    const preSaveWhitePath = path.join(ARTIFACT_DIR, 'edited_sticker_017_white_backed.png');
+    await preSaveWhiteDownload.saveAs(preSaveWhitePath);
+    const preSaveWhiteBuf = fs.readFileSync(preSaveWhitePath);
+
+    // Select sticker_017 to adjust its border thickness to 0px (artwork only)
+    console.log('Exporting post-edit artwork-only (0px border) reference for sticker_017...');
+    await card17PreSave.click();
+    await page.waitForTimeout(300);
+    const borderSlider = page.locator('aside input[type="range"][max="60"]').first();
+    const origBorderVal = await borderSlider.inputValue();
+    await borderSlider.fill('0');
+    await page.waitForTimeout(400);
+
+    const [preSaveArtDownload] = await Promise.all([
+      page.waitForEvent('download', { timeout: 30000 }),
+      card17PreSave.locator('button[title*="Export"]').click()
+    ]);
+    const preSaveArtPath = path.join(ARTIFACT_DIR, 'edited_sticker_017_artwork_only.png');
+    await preSaveArtDownload.saveAs(preSaveArtPath);
+    const preSaveArtBuf = fs.readFileSync(preSaveArtPath);
+
+    // Restore border thickness back to original value (e.g. 20)
+    await borderSlider.fill(origBorderVal);
+    await page.waitForTimeout(400);
+
+    // 2. Save the project to .stickerstudio archive
+    console.log('Saving accepted project to .stickerstudio archive...');
     const [projectDownload] = await Promise.all([
       page.waitForEvent('download', { timeout: 30000 }),
       page.click('button:has-text("Save Project")')
@@ -708,11 +743,23 @@ async function runBrowserAcceptanceCheck() {
     await projectDownload.saveAs(projectArchiveFile);
     console.log('Saved project to:', projectArchiveFile);
 
-    // Completely reload page to purge in-memory state
+    // 3. Inspect archive structure and schema directly
+    const archiveData = fs.readFileSync(projectArchiveFile);
+    const archiveZip = await JSZip.loadAsync(archiveData);
+    assert.ok(archiveZip.file('alpha_mask.bin'), 'Archive must contain alpha_mask.bin');
+    assert.ok(archiveZip.file('label_map.bin'), 'Archive must contain label_map.bin');
+    const metaStr = await archiveZip.file('project.json').async('string');
+    const metaObj = JSON.parse(metaStr);
+    assert.strictEqual(metaObj.metadata.schemaVersion, 2, 'Archive schemaVersion must be 2');
+    console.log('Archive container verified: schemaVersion=2, alpha_mask.bin and label_map.bin present.');
+
+    // 4. Completely reload page to purge all in-memory state
+    console.log('Purging in-memory workspace and reloading page...');
     await page.reload({ waitUntil: 'networkidle' });
     await page.waitForTimeout(500);
 
-    // Open project through UI file input
+    // 5. Open project through UI file input
+    console.log('Reopening saved project via UI file input...');
     const projectInput = page.locator('input[type="file"][accept*=".stickerstudio"]').first();
     await projectInput.setInputFiles(projectArchiveFile);
     await page.waitForTimeout(1500);
@@ -721,7 +768,84 @@ async function runBrowserAcceptanceCheck() {
     const reloadedActiveText = await page.locator('span.bg-pink-50').textContent();
     assert.match(reloadedActiveText, /20\s+Active\s+Stickers/i, 'Project reopen must restore 20 active stickers');
 
-    // Export again from reopened project
+    // 6. Export white-backed sticker_017 from reopened project
+    console.log('Exporting white-backed sticker_017 from reopened project...');
+    const card17Reopened = page.locator('div.relative:has-text("sticker_017")');
+    const [reopenWhiteDownload] = await Promise.all([
+      page.waitForEvent('download', { timeout: 30000 }),
+      card17Reopened.locator('button[title*="Export"]').click()
+    ]);
+    const reopenWhitePath = path.join(ARTIFACT_DIR, 'reopened_sticker_017_white_backed.png');
+    await reopenWhiteDownload.saveAs(reopenWhitePath);
+    const reopenWhiteBuf = fs.readFileSync(reopenWhitePath);
+
+    // 7. Export artwork-only sticker_017 from reopened project
+    console.log('Exporting artwork-only sticker_017 from reopened project...');
+    await card17Reopened.click();
+    await page.waitForTimeout(300);
+    const reloadedBorderSlider = page.locator('aside input[type="range"][max="60"]').first();
+    await reloadedBorderSlider.fill('0');
+    await page.waitForTimeout(400);
+
+    const [reopenArtDownload] = await Promise.all([
+      page.waitForEvent('download', { timeout: 30000 }),
+      card17Reopened.locator('button[title*="Export"]').click()
+    ]);
+    const reopenArtPath = path.join(ARTIFACT_DIR, 'reopened_sticker_017_artwork_only.png');
+    await reopenArtDownload.saveAs(reopenArtPath);
+    const reopenArtBuf = fs.readFileSync(reopenArtPath);
+
+    // Restore border slider
+    await reloadedBorderSlider.fill(origBorderVal);
+    await page.waitForTimeout(400);
+
+    // 8. Assert exact bit-for-bit fidelity between pre-save and post-reopen exports
+    console.log('Asserting exact bit-for-bit fidelity...');
+    assert.strictEqual(
+      Buffer.compare(reopenWhiteBuf, preSaveWhiteBuf),
+      0,
+      'Reopened white-backed PNG must match pre-save edited PNG bit-for-bit'
+    );
+    assert.strictEqual(
+      Buffer.compare(reopenArtBuf, preSaveArtBuf),
+      0,
+      'Reopened artwork-only PNG must match pre-save edited PNG bit-for-bit'
+    );
+    console.log('Both white-backed and artwork-only exports matched pre-save edited state bit-for-bit.');
+
+    // 9. Assert erased region remains erased (does NOT revert to original source pixels)
+    console.log('Verifying erased stroke preservation in export...');
+    assert.notDeepStrictEqual(
+      reopenArtBuf,
+      chaiApprovedBuf,
+      'Reopened artwork PNG must NOT revert to unedited pre-stroke PNG'
+    );
+
+    const preEditRaw = await sharp(chaiApprovedBuf).ensureAlpha().raw().toBuffer();
+    const reopenRaw = await sharp(reopenArtBuf).ensureAlpha().raw().toBuffer();
+    const preEditMeta = await sharp(chaiApprovedBuf).metadata();
+    const reopenMeta = await sharp(reopenArtBuf).metadata();
+
+    let erasedPixelCountInExport = 0;
+    const minW = Math.min(preEditMeta.width, reopenMeta.width);
+    const minH = Math.min(preEditMeta.height, reopenMeta.height);
+    for (let y = 0; y < minH; y++) {
+      for (let x = 0; x < minW; x++) {
+        const preA = preEditRaw[(y * preEditMeta.width + x) * 4 + 3];
+        const postA = reopenRaw[(y * reopenMeta.width + x) * 4 + 3];
+        if (preA > 100 && postA === 0) {
+          erasedPixelCountInExport++;
+        }
+      }
+    }
+    assert.ok(
+      erasedPixelCountInExport > 10,
+      `Erased pixels must be preserved as transparent in export (found ${erasedPixelCountInExport})`
+    );
+    console.log(`Erased pixels verified: ${erasedPixelCountInExport} pixels preserved as transparent.`);
+
+    // 10. Export all from reopened project and verify full ZIP
+    console.log('Exporting all 20 stickers from reopened project...');
     const [roundtripDownload] = await Promise.all([
       page.waitForEvent('download', { timeout: 30000 }),
       page.click('button:has-text("Export All")')
@@ -734,20 +858,21 @@ async function runBrowserAcceptanceCheck() {
     const rtPngEntries = Object.keys(rtZip.files).filter(f => f.endsWith('.png')).sort();
     assert.strictEqual(rtPngEntries.length, 20, 'Reopened project must export exactly 20 PNGs');
 
-    // Decode and compare a sticker from both exports
-    const orig17Buf = await loadedZip.file('sticker_017.png').async('nodebuffer');
-    const rt17Buf = await rtZip.file('sticker_017.png').async('nodebuffer');
-    const origMeta = await sharp(orig17Buf).metadata();
-    const rtMeta = await sharp(rt17Buf).metadata();
-    assert.strictEqual(rtMeta.width, origMeta.width, 'Reopened exported PNG width must match');
-    assert.strictEqual(rtMeta.height, origMeta.height, 'Reopened exported PNG height must match');
+    const zip17Buf = await rtZip.file('sticker_017.png').async('nodebuffer');
+    assert.strictEqual(
+      Buffer.compare(zip17Buf, reopenWhiteBuf),
+      0,
+      'Export All ZIP sticker_017 must match individual export bit-for-bit'
+    );
 
     results.projectRoundTrip = {
       roundTripSuccessful: true,
       exportedPngCount: rtPngEntries.length,
-      sampleDimensionsMatch: true
+      whiteBackedBitIdentical: true,
+      artworkOnlyBitIdentical: true,
+      erasedPixelsPreservedCount: erasedPixelCountInExport
     };
-    console.log('Real project round-trip completed and verified.');
+    console.log('Real project round-trip completed and verified with exact bit-for-bit fidelity.');
 
     // -------------------------------------------------------------------------
     // STEP 9: Complete Offline PWA Workflow

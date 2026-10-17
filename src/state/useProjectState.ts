@@ -845,6 +845,8 @@ export function useProjectState() {
     const blob = await saveProjectArchive({
       name: fileName ? fileName.replace(/\.[^/.]+$/, '') : 'Sticker_Project',
       sourceImage,
+      alphaMask: alphaMask || undefined,
+      labelMap: labelMap || undefined,
       settings,
       components,
       groups,
@@ -873,7 +875,7 @@ export function useProjectState() {
       a.click();
       URL.revokeObjectURL(url);
     }
-  }, [sourceImage, fileName, settings, components, groups, holes, globalBorderThickness]);
+  }, [sourceImage, fileName, alphaMask, labelMap, settings, components, groups, holes, globalBorderThickness]);
 
   const loadProject = useCallback(async (file: File | Blob) => {
     setIsProcessing(true);
@@ -888,31 +890,8 @@ export function useProjectState() {
       setComponents(loaded.components);
       setGroups(loaded.groups);
       setHoles(loaded.holes);
-
-      const width = loaded.metadata.imageDimensions.width;
-      const height = loaded.metadata.imageDimensions.height;
-      const size = width * height;
-      const newLabels = new Uint16Array(size);
-      const newAlpha = new Uint8Array(size);
-
-      for (let i = 0; i < size; i++) {
-        newAlpha[i] = loaded.sourceImage.data[i * 4 + 3];
-      }
-
-      for (const comp of loaded.components) {
-        const { x, y, width: cw, height: ch } = comp.bounds;
-        for (let ly = 0; ly < ch; ly++) {
-          for (let lx = 0; lx < cw; lx++) {
-            const idx = (y + ly) * width + (x + lx);
-            if (newAlpha[idx] > 0 && newLabels[idx] === 0) {
-              newLabels[idx] = comp.label;
-            }
-          }
-        }
-      }
-
-      setLabelMap(newLabels);
-      setAlphaMask(newAlpha);
+      setLabelMap(loaded.labelMap);
+      setAlphaMask(loaded.alphaMask);
       groupDistanceFieldsRef.current.clear();
       historyRef.current = [];
       futureRef.current = [];

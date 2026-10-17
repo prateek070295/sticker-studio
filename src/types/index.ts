@@ -170,14 +170,26 @@ export interface SplitPreview {
   countB: number;
 }
 
+export interface MaskPayloadMetadata {
+  fileName: string;
+  format: 'uint8' | 'uint16';
+  bytesPerElement: number;
+  byteOrder?: 'little-endian';
+  byteLength: number;
+}
+
 export interface ProjectMetadata {
   version: '1.1';
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   createdAt: number;
   updatedAt: number;
   name: string;
   sourceSha256: string;
   imageDimensions: { width: number; height: number };
+  maskMetadata?: {
+    alphaMask: MaskPayloadMetadata;
+    labelMap: MaskPayloadMetadata;
+  };
   settings: ExtractionSettings;
   globalBorderThickness: number;
   globalSolidBacking: boolean;

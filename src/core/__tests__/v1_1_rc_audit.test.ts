@@ -9,7 +9,7 @@ import { buildGroupDistanceField, compositeSticker } from '../composer';
 import { applyBrushStroke, applyBrushPatchWithOwnership, revertBrushPatchWithOwnership } from '../maskPatch';
 import { previewTouchingSplit, commitTouchingSplit } from '../watershedSplit';
 import { inspectStickerEdge, DEFAULT_EDGE_CONFIG } from '../edgeInspector';
-import { saveProjectArchive, loadProjectArchive, computeSha256, MAX_ARCHIVE_BYTES } from '../projectArchive';
+import { saveProjectArchive, loadProjectArchive, computeSha256, MAX_ARCHIVE_BYTES, CURRENT_SCHEMA_VERSION } from '../projectArchive';
 import { ArtworkComponent, BoundingBox, StickerGroup, TouchingSplitRequest } from '../../types';
 import JSZip from 'jszip';
 
@@ -957,7 +957,7 @@ describe('STICKER STUDIO V1.1 — RELEASE CANDIDATE AUDIT SUITE', () => {
     it('Defends against Referential Integrity violation (orphaned or double-claimed components)', async () => {
       const zip = new JSZip();
       zip.file('project.json', JSON.stringify({
-        metadata: { schemaVersion: 1, imageDimensions: { width: 10, height: 10 } },
+        metadata: { schemaVersion: CURRENT_SCHEMA_VERSION, imageDimensions: { width: 10, height: 10 } },
         components: [
           { id: 'c1', label: 1, bounds: { x: 0, y: 0, width: 5, height: 5 }, centroid: { x: 2, y: 2 }, pixelCount: 25 }
         ],

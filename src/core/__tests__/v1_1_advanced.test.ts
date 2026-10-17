@@ -27,7 +27,8 @@ import {
   loadProjectArchive,
   MAX_ARCHIVE_BYTES,
   MAX_DECOMPRESSION_RATIO,
-  saveProjectArchive
+  saveProjectArchive,
+  CURRENT_SCHEMA_VERSION
 } from '../projectArchive';
 import {
   DEFAULT_EDGE_CONFIG,
@@ -718,7 +719,7 @@ describe('V1.1 Hardened Project Archive Security & Integrity', () => {
 
     const loaded = await loadProjectArchive(archiveBlob);
     expect(loaded.metadata.name).toBe('Test Project');
-    expect(loaded.metadata.schemaVersion).toBe(1);
+    expect(loaded.metadata.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(loaded.components.length).toBe(1);
     expect(loaded.groups.length).toBe(1);
     expect(loaded.sourceImage.width).toBe(16);
@@ -773,7 +774,7 @@ describe('V1.1 Hardened Project Archive Security & Integrity', () => {
         data: new TextEncoder().encode(JSON.stringify({
           metadata: {
             version: '1.1',
-            schemaVersion: 1,
+            schemaVersion: CURRENT_SCHEMA_VERSION,
             sourceSha256: '0000000000000000000000000000000000000000000000000000000000000000',
             imageDimensions: { width: 8, height: 8 }
           },
@@ -784,6 +785,14 @@ describe('V1.1 Hardened Project Archive Security & Integrity', () => {
       {
         name: 'source.png',
         data: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]) // dummy bytes
+      },
+      {
+        name: 'alpha_mask.bin',
+        data: new Uint8Array(64)
+      },
+      {
+        name: 'label_map.bin',
+        data: new Uint8Array(128)
       }
     ];
 
@@ -809,7 +818,7 @@ describe('V1.1 Hardened Project Archive Security & Integrity', () => {
         data: new TextEncoder().encode(JSON.stringify({
           metadata: {
             version: '1.1',
-            schemaVersion: 1,
+            schemaVersion: CURRENT_SCHEMA_VERSION,
             sourceSha256: '',
             imageDimensions: { width: 8, height: 8 }
           },

@@ -1,5 +1,5 @@
 {
-  "applicationBuildCommit": "683dcd2688d358a58de92b1595e131a88239b2f3",
+  "applicationBuildCommit": "da3a289ce5bd16affc69832a137544774da7b2a3",
   "dirtyWorkingTree": true,
   "browserVersion": "153.0.8010.12",
   "inputVerification": {
@@ -161,7 +161,9 @@
   "projectRoundTrip": {
     "roundTripSuccessful": true,
     "exportedPngCount": 20,
-    "sampleDimensionsMatch": true
+    "whiteBackedBitIdentical": true,
+    "artworkOnlyBitIdentical": true,
+    "erasedPixelsPreservedCount": 4066
   },
   "offlinePwaWorkflow": {
     "reloadedOffline": true,
