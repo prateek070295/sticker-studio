@@ -523,10 +523,13 @@ describe('Exact Project Persistence Regression Test', () => {
         customBorder: false,
         whiteBackingEnabled: true,
         connectBacking: true,
-        smoothingRadius: 2,
+        solidBacking: false,
+        bridges: [],
+        excludedFromExport: false,
         backingOverride: {
           groupId: 'g1',
           bounds: { x: 0, y: 0, width: 10, height: 10 },
+          smoothingRadius: 2,
           addedMask: mask1
         }
       },
@@ -539,10 +542,13 @@ describe('Exact Project Persistence Regression Test', () => {
         customBorder: false,
         whiteBackingEnabled: true,
         connectBacking: true,
-        smoothingRadius: 2,
+        solidBacking: false,
+        bridges: [],
+        excludedFromExport: false,
         backingOverride: {
           groupId: 'g2',
           bounds: { x: 10, y: 0, width: 10, height: 10 },
+          smoothingRadius: 2,
           addedMask: mask2
         }
       }
