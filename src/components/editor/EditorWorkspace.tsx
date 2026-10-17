@@ -13,7 +13,7 @@ interface EditorWorkspaceProps {
   onPointerUp?: (e: React.PointerEvent) => void;
   onPointerLeave?: (e: React.PointerEvent) => void;
   screenToCanvasRef: React.MutableRefObject<((clientX: number, clientY: number) => { x: number; y: number }) | null>;
-  zoomTrigger?: { type: 'fit' | '100%'; timestamp: number } | null;
+  zoomTrigger?: { type: 'fit' | '100%' | '50%' | '200%' | '400%'; timestamp: number } | null;
   children: React.ReactNode;
 }
 
@@ -30,6 +30,7 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const contentWrapperRef = useRef<HTMLDivElement>(null);
+  const hasInitialFittedRef = useRef<boolean>(false);
   const [scale, setScale] = useState<number>(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState<boolean>(false);
@@ -68,24 +69,32 @@ export const EditorWorkspace: React.FC<EditorWorkspaceProps> = ({
     });
   }, [patchBounds]);
 
+  // Fit to view once upon opening/mounting, without resetting viewport on every stroke
   useEffect(() => {
-    fitToView();
-  }, [fitToView]);
+    if (!hasInitialFittedRef.current && patchBounds.width > 0 && patchBounds.height > 0) {
+      fitToView();
+      hasInitialFittedRef.current = true;
+    }
+  }, [fitToView, patchBounds.width, patchBounds.height]);
 
   // Handle zoom presets trigger
   useEffect(() => {
     if (!zoomTrigger) return;
     if (zoomTrigger.type === 'fit') {
       fitToView();
-    } else if (zoomTrigger.type === '100%') {
-      if (containerRef.current) {
-        const { clientWidth, clientHeight } = containerRef.current;
-        setScale(1);
-        setPan({
-          x: (clientWidth - patchBounds.width) / 2,
-          y: (clientHeight - patchBounds.height) / 2
-        });
-      }
+    } else if (containerRef.current) {
+      const { clientWidth, clientHeight } = containerRef.current;
+      let targetScale = 1.0;
+      if (zoomTrigger.type === '50%') targetScale = 0.5;
+      else if (zoomTrigger.type === '100%') targetScale = 1.0;
+      else if (zoomTrigger.type === '200%') targetScale = 2.0;
+      else if (zoomTrigger.type === '400%') targetScale = 4.0;
+
+      setScale(targetScale);
+      setPan({
+        x: (clientWidth - patchBounds.width * targetScale) / 2,
+        y: (clientHeight - patchBounds.height * targetScale) / 2
+      });
     }
   }, [zoomTrigger, fitToView, patchBounds]);
 

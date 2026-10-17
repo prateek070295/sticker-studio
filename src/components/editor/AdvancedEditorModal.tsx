@@ -88,7 +88,7 @@ export const AdvancedEditorModal: React.FC<AdvancedEditorModalProps> = ({
   const [highlightedBox, setHighlightedBox] = useState<BoundingBox | null>(null);
 
   // Zoom preset trigger
-  const [zoomTrigger, setZoomTrigger] = useState<{ type: 'fit' | '100%'; timestamp: number } | null>(null);
+  const [zoomTrigger, setZoomTrigger] = useState<{ type: 'fit' | '100%' | '50%' | '200%' | '400%'; timestamp: number } | null>(null);
 
   // Screen to canvas coordinate transform ref
   const screenToCanvasRef = useRef<((clientX: number, clientY: number) => { x: number; y: number }) | null>(null);
@@ -300,6 +300,7 @@ export const AdvancedEditorModal: React.FC<AdvancedEditorModalProps> = ({
           onRedo={onRedo}
           onZoomFit={() => setZoomTrigger({ type: 'fit', timestamp: Date.now() })}
           onZoom100={() => setZoomTrigger({ type: '100%', timestamp: Date.now() })}
+          onZoomPreset={preset => setZoomTrigger({ type: preset, timestamp: Date.now() })}
         />
 
         {/* Main Work Area */}

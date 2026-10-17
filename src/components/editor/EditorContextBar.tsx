@@ -37,6 +37,7 @@ interface EditorContextBarProps {
   onRedo: () => void;
   onZoomFit: () => void;
   onZoom100: () => void;
+  onZoomPreset?: (preset: '50%' | '100%' | '200%' | '400%') => void;
 }
 
 export const EditorContextBar: React.FC<EditorContextBarProps> = ({
@@ -61,7 +62,8 @@ export const EditorContextBar: React.FC<EditorContextBarProps> = ({
   onUndo,
   onRedo,
   onZoomFit,
-  onZoom100
+  onZoom100,
+  onZoomPreset
 }) => {
   const isBrushTool =
     toolMode === 'restore-brush' ||
@@ -195,11 +197,32 @@ export const EditorContextBar: React.FC<EditorContextBarProps> = ({
           <Maximize2 className="w-4 h-4" />
         </button>
         <button
+          onClick={() => onZoomPreset ? onZoomPreset('50%') : null}
+          title="Zoom 50%"
+          className="px-1.5 py-0.5 hover:bg-neutral-200 rounded cursor-pointer font-mono text-[11px] text-neutral-600"
+        >
+          50%
+        </button>
+        <button
           onClick={onZoom100}
           title="Zoom 100%"
           className="px-1.5 py-0.5 hover:bg-neutral-200 rounded cursor-pointer font-mono text-[11px] text-neutral-600"
         >
           100%
+        </button>
+        <button
+          onClick={() => onZoomPreset ? onZoomPreset('200%') : null}
+          title="Zoom 200%"
+          className="px-1.5 py-0.5 hover:bg-neutral-200 rounded cursor-pointer font-mono text-[11px] text-neutral-600"
+        >
+          200%
+        </button>
+        <button
+          onClick={() => onZoomPreset ? onZoomPreset('400%') : null}
+          title="Zoom 400%"
+          className="px-1.5 py-0.5 hover:bg-neutral-200 rounded cursor-pointer font-mono text-[11px] text-neutral-600"
+        >
+          400%
         </button>
 
         <div className="h-4 w-px bg-neutral-300 mx-1" />

@@ -1,0 +1,191 @@
+{
+  "applicationBuildCommit": "683dcd2688d358a58de92b1595e131a88239b2f3",
+  "dirtyWorkingTree": true,
+  "browserVersion": "153.0.8010.12",
+  "inputVerification": {
+    "sha256": "F41F9703266F2B27251EC7EEA54E498CCFDADE1130478B5C7D01D9B4E3CBF806",
+    "dimensions": "736x1024",
+    "bytes": 168704,
+    "byteIdenticalToBundled": true
+  },
+  "freeFormAudit": {
+    "label": "40 Active Stickers",
+    "status": "VISUALLY REVIEWED",
+    "note": "Free-form mode without layout priors produces fragmented badges (e.g. 40 groups) and groups illustrations with nearby captions."
+  },
+  "gridMode20Stickers": {
+    "activeText": "20 Active Stickers",
+    "totalCardsRendered": 40
+  },
+  "artworkContentValidation": {
+    "status": "VISUALLY REVIEWED AND PIXEL-VERIFIED",
+    "totalPngs": 20,
+    "chaiApprovedStrata": {
+      "top": 5930,
+      "mid": 9026,
+      "bot": 6043
+    },
+    "chaiDeptStrata": {
+      "top": 6803,
+      "mid": 9961,
+      "bot": 6628
+    },
+    "slogansPreserved": {
+      "importantMeetingWithChaiPixels": 5211,
+      "oneSipAtATimePixels": 6922
+    }
+  },
+  "eraserCoordinateMetrics": [
+    {
+      "condition": "50%",
+      "target": "center",
+      "diffX": 0,
+      "diffY": 0,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "50%",
+      "target": "quad_tl",
+      "diffX": 0.000024414062522737368,
+      "diffY": 0.0000061035156022626325,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "50%",
+      "target": "quad_br",
+      "diffX": 0.000024414062522737368,
+      "diffY": 0.000024414062522737368,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "100%",
+      "target": "center",
+      "diffX": 0,
+      "diffY": 0,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "100%",
+      "target": "quad_tl",
+      "diffX": 0.000012207031204525265,
+      "diffY": 0.000012207031261368684,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "100%",
+      "target": "quad_br",
+      "diffX": 0.000012207031204525265,
+      "diffY": 0.000012207031204525265,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "200%",
+      "target": "center",
+      "diffX": 0,
+      "diffY": 0,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "200%",
+      "target": "quad_tl",
+      "diffX": 0.000024414062522737368,
+      "diffY": 0.0000061035156022626325,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "200%",
+      "target": "quad_br",
+      "diffX": 0.000024414062522737368,
+      "diffY": 0.00002441406240905053,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "400%",
+      "target": "center",
+      "diffX": 0,
+      "diffY": 0,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "400%",
+      "target": "quad_tl",
+      "diffX": 0.000012207031204525265,
+      "diffY": 0.000012207031261368684,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "400%",
+      "target": "quad_br",
+      "diffX": 0.000012207031204525265,
+      "diffY": 0.000012207031318212103,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "nonzero_pan",
+      "target": "center",
+      "diffX": 0,
+      "diffY": 0,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "nonzero_pan",
+      "target": "quad_tl",
+      "diffX": 0.000012207031204525265,
+      "diffY": 0.000012207031261368684,
+      "isWithin1Px": true
+    },
+    {
+      "condition": "nonzero_pan",
+      "target": "quad_br",
+      "diffX": 0.000012207031204525265,
+      "diffY": 0.000012207031318212103,
+      "isWithin1Px": true
+    }
+  ],
+  "dpr2CoordinateMetrics": [
+    {
+      "dpr": 2,
+      "diffX": 0.000030517578125,
+      "diffY": 0,
+      "isWithin1Px": true
+    }
+  ],
+  "actualPixelErasure": {
+    "modifiedPixelCount": 1127,
+    "viewportPreserved": true
+  },
+  "exactUndoRedo": {
+    "undoBitIdentical": true,
+    "redoBitIdentical": true
+  },
+  "projectRoundTrip": {
+    "roundTripSuccessful": true,
+    "exportedPngCount": 20,
+    "sampleDimensionsMatch": true
+  },
+  "offlinePwaWorkflow": {
+    "reloadedOffline": true,
+    "importedUnprocessedSheetOffline": true,
+    "advancedEditorLoadedOffline": true,
+    "erasedOffline": true,
+    "savedProjectOffline": true,
+    "reopenedProjectOffline": true,
+    "exportedZipOffline": true
+  },
+  "summary": {
+    "status": "ALL_REQUIREMENTS_PASSED",
+    "checks": {
+      "negativeControl": "PASS",
+      "inputIntegrity": "PASS",
+      "gridPartitioning20Stickers": "PASS",
+      "artworkContentPreservation": "PASS",
+      "captionExclusion": "PASS",
+      "eraserAlignmentWithin1Px": "PASS",
+      "actualPixelErasure": "PASS",
+      "exactUndoRedo": "PASS",
+      "viewportStability": "PASS",
+      "realProjectRoundTrip": "PASS",
+      "completeOfflineWorkflow": "PASS"
+    }
+  }
+}
