@@ -4,7 +4,7 @@
  * and outputs print-ready transparent RGBA buffers.
  */
 
-import { computeEuclideanDistanceTransform } from './edt';
+import { computeEuclideanDistanceTransform, computeSignedDistanceField } from './edt';
 import { rasterizeBridge } from './bridging';
 import { ArtworkComponent, BoundingBox, StickerGroup } from '../types';
 
@@ -16,53 +16,70 @@ export interface ComposedSticker {
 }
 
 /**
- * Applies a separable morphological filter to smooth jagged raster steps along silhouette contours.
+ * Applies Signed Distance Field (SDF) contour smoothing to eliminate jagged staircase steps
+ * and irregular protrusions along the die-cut backing silhouette.
+ * Uses a 2-pass separable isotropic moving-average filter on the signed distance field,
+ * extracting the smoothed 0-isocontour as the seed for Euclidean Distance Transform.
  */
-function applyContourSmoothing(mask: Uint8Array, width: number, height: number, radius: number): Uint8Array {
+export function applyContourSmoothing(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  radius: number
+): Uint8Array {
   if (radius <= 0) return mask;
-  const temp = new Float32Array(width * height);
-  const out = new Uint8Array(width * height);
-  const r = Math.min(10, Math.round(radius));
 
-  // Horizontal blur pass
-  for (let y = 0; y < height; y++) {
-    const rowOffset = y * width;
-    let sum = 0;
-    for (let x = 0; x < width; x++) {
-      if (x === 0) {
-        for (let k = -r; k <= r; k++) {
-          const px = Math.max(0, Math.min(width - 1, k));
-          sum += mask[rowOffset + px];
-        }
-      } else {
+  const sdf = computeSignedDistanceField(mask, width, height);
+  const r = Math.max(1, Math.min(25, Math.round(radius * 1.5)));
+  const size = width * height;
+  let current = new Float32Array(sdf);
+  const temp = new Float32Array(size);
+  const out = new Float32Array(size);
+
+  // 2 passes of moving average approximates an isotropic Gaussian filter
+  for (let pass = 0; pass < 2; pass++) {
+    // Horizontal blur pass
+    for (let y = 0; y < height; y++) {
+      const rowOffset = y * width;
+      let sum = 0;
+      for (let k = -r; k <= r; k++) {
+        const px = Math.max(0, Math.min(width - 1, k));
+        sum += current[rowOffset + px];
+      }
+      temp[rowOffset] = sum / (2 * r + 1);
+      for (let x = 1; x < width; x++) {
         const drop = Math.max(0, x - r - 1);
         const add = Math.min(width - 1, x + r);
-        sum += mask[rowOffset + add] - mask[rowOffset + drop];
+        sum += current[rowOffset + add] - current[rowOffset + drop];
+        temp[rowOffset + x] = sum / (2 * r + 1);
       }
-      temp[rowOffset + x] = sum / (2 * r + 1);
     }
-  }
 
-  // Vertical blur pass & thresholding at 0.5
-  for (let x = 0; x < width; x++) {
-    let sum = 0;
-    for (let y = 0; y < height; y++) {
-      if (y === 0) {
-        for (let k = -r; k <= r; k++) {
-          const py = Math.max(0, Math.min(height - 1, k));
-          sum += temp[py * width + x];
-        }
-      } else {
+    // Vertical blur pass
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      for (let k = -r; k <= r; k++) {
+        const py = Math.max(0, Math.min(height - 1, k));
+        sum += temp[py * width + x];
+      }
+      out[x] = sum / (2 * r + 1);
+      for (let y = 1; y < height; y++) {
         const drop = Math.max(0, y - r - 1);
         const add = Math.min(height - 1, y + r);
         sum += temp[add * width + x] - temp[drop * width + x];
+        out[y * width + x] = sum / (2 * r + 1);
       }
-      const val = sum / (2 * r + 1);
-      out[y * width + x] = val >= 0.5 ? 1 : 0;
     }
+    current.set(out);
   }
 
-  return out;
+  // Extract 0-level set: <= 0 is foreground
+  const resultMask = new Uint8Array(size);
+  for (let i = 0; i < size; i++) {
+    resultMask[i] = current[i] <= 0 ? 1 : 0;
+  }
+
+  return resultMask;
 }
 
 /**
@@ -273,6 +290,12 @@ export function compositeSticker(
           // Smooth 1-pixel antialiasing transition at edge
           const frac = (radius + 0.5) - dist;
           backingAlpha = Math.round(Math.max(0, Math.min(255, frac * 255)));
+        }
+
+        // Safety enclosure invariant: artwork pixels always have full white backing under them
+        // so that smoothed die-cut borders never erode underneath convex tips
+        if (artworkAlpha > 0 && backingAlpha < 255) {
+          backingAlpha = 255;
         }
       }
 

@@ -58,6 +58,7 @@ export interface ProjectSaveState {
     edgeTrim?: number;
     bottomFinish?: 'flat' | 'rounded' | 'curved';
     bottomCurveRadius?: number;
+    smoothOutline?: number;
   };
 }
 

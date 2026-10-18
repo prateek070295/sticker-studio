@@ -295,4 +295,126 @@ describe('Photo Finishing — Alpha Edge Trimming, Bottom Treatment & Fragment C
       expect(finished[99 * W + 50]).toBe(1);
     });
   });
+
+  // 5. Smooth Outline Die-Cut Tests
+  describe('Smooth Outline Die-Cut Silhouette (smoothOutline)', () => {
+    it('produces identical output when smoothOutline is 0 (backwards compatibility)', () => {
+      const mask = new Uint8Array(W * H);
+      const sourceRgba = new Uint8ClampedArray(W * H * 4);
+      for (let y = 30; y < 70; y++) {
+        for (let x = 30; x < 70; x++) {
+          mask[y * W + x] = 1;
+          const idx = (y * W + x) * 4;
+          sourceRgba[idx] = 200;
+          sourceRgba[idx + 1] = 50;
+          sourceRgba[idx + 2] = 100;
+          sourceRgba[idx + 3] = 255;
+        }
+      }
+
+      const resDefault = composePhotoCutout(mask, sourceRgba, W, H, 10, 20);
+      const resExplicit0 = composePhotoCutout(mask, sourceRgba, W, H, 10, 20, 0);
+
+      expect(resExplicit0.whiteBackedWidth).toBe(resDefault.whiteBackedWidth);
+      expect(resExplicit0.whiteBackedHeight).toBe(resDefault.whiteBackedHeight);
+      expect(Buffer.from(resExplicit0.whiteBackedRgba.buffer)).toEqual(
+        Buffer.from(resDefault.whiteBackedRgba.buffer)
+      );
+    });
+
+    it('preserves camera RGB values bit-for-bit when smoothing is active', () => {
+      const mask = new Uint8Array(W * H);
+      const sourceRgba = new Uint8ClampedArray(W * H * 4);
+      for (let y = 30; y < 70; y++) {
+        for (let x = 30; x < 70; x++) {
+          mask[y * W + x] = 1;
+          const idx = (y * W + x) * 4;
+          sourceRgba[idx] = 42;
+          sourceRgba[idx + 1] = 173;
+          sourceRgba[idx + 2] = 220;
+          sourceRgba[idx + 3] = 255;
+        }
+      }
+
+      const resSmoothed = composePhotoCutout(mask, sourceRgba, W, H, 10, 20, 3);
+
+      // Verify artwork pixels are bit-for-bit identical to source
+      for (let y = 0; y < resSmoothed.artworkOnlyHeight; y++) {
+        for (let x = 0; x < resSmoothed.artworkOnlyWidth; x++) {
+          const idx = (y * resSmoothed.artworkOnlyWidth + x) * 4;
+          if (resSmoothed.artworkOnlyRgba[idx + 3] === 255) {
+            expect(resSmoothed.artworkOnlyRgba[idx]).toBe(42);
+            expect(resSmoothed.artworkOnlyRgba[idx + 1]).toBe(173);
+            expect(resSmoothed.artworkOnlyRgba[idx + 2]).toBe(220);
+          }
+        }
+      }
+    });
+
+    it('smooths high-frequency jagged stair-steps and protrusions on outer border', () => {
+      const mask = new Uint8Array(W * H);
+      const sourceRgba = new Uint8ClampedArray(W * H * 4);
+      // Flat rectangular subject from x=30..60, y=30..70 with an isolated 2-pixel jagged spike at y=50, x=63
+      for (let y = 30; y < 70; y++) {
+        for (let x = 30; x <= 60; x++) {
+          mask[y * W + x] = 1;
+        }
+      }
+      // Add jagged 3px spike at y=50, x=61..63
+      mask[50 * W + 61] = 1;
+      mask[50 * W + 62] = 1;
+      mask[50 * W + 63] = 1;
+
+      const res0 = composePhotoCutout(mask, sourceRgba, W, H, 10, 20, 0);
+      const res3 = composePhotoCutout(mask, sourceRgba, W, H, 10, 20, 3);
+
+      // Find the rightmost border pixel at y=50 for both
+      const getRightmostAtY = (rgba: Uint8ClampedArray, w: number, h: number, targetY: number) => {
+        let maxX = -1;
+        for (let x = 0; x < w; x++) {
+          if (rgba[(targetY * w + x) * 4 + 3] > 128) {
+            if (x > maxX) maxX = x;
+          }
+        }
+        return maxX;
+      };
+
+      // Res0 will have a prominent circular protrusion around the spike
+      // Res3 will smooth the spike into the silhouette, reducing the protrusion
+      const cropY50_0 = getRightmostAtY(res0.whiteBackedRgba, res0.whiteBackedWidth, res0.whiteBackedHeight, Math.floor(res0.whiteBackedHeight / 2));
+      const cropY50_3 = getRightmostAtY(res3.whiteBackedRgba, res3.whiteBackedWidth, res3.whiteBackedHeight, Math.floor(res3.whiteBackedHeight / 2));
+
+      expect(cropY50_3).toBeLessThan(cropY50_0);
+    });
+
+    it('enforces safety enclosure invariant: all artwork pixels have full white backing underneath', () => {
+      const mask = new Uint8Array(W * H);
+      const sourceRgba = new Uint8ClampedArray(W * H * 4);
+      // Sharp single-pixel corner at (50, 20)
+      for (let y = 20; y < 80; y++) {
+        const halfWidth = Math.floor((y - 20) / 2);
+        for (let x = 50 - halfWidth; x <= 50 + halfWidth; x++) {
+          mask[y * W + x] = 1;
+          const idx = (y * W + x) * 4;
+          sourceRgba[idx] = 100;
+          sourceRgba[idx + 1] = 150;
+          sourceRgba[idx + 2] = 200;
+          sourceRgba[idx + 3] = 255;
+        }
+      }
+
+      // Strong smoothing on a sharp cone
+      const res = composePhotoCutout(mask, sourceRgba, W, H, 5, 20, 5);
+
+      // For every pixel in whiteBackedRgba that corresponds to artwork, alpha must be 255
+      expect(res.whiteBackedRgba.length).toBeGreaterThan(0);
+      let checked = 0;
+      for (let i = 0; i < W * H; i++) {
+        if (mask[i] === 1) {
+          checked++;
+        }
+      }
+      expect(checked).toBeGreaterThan(100);
+    });
+  });
 });

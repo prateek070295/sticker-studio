@@ -32,6 +32,7 @@ export interface UsePhotoModeReturn {
   toolMode: PhotoToolMode;
   brushSize: number;
   edgeTrim: number;
+  smoothOutline: number;
   bottomFinish: 'flat' | 'rounded' | 'curved';
   bottomCurveRadius: number;
   touchesBottomEdge: boolean;
@@ -61,6 +62,7 @@ export interface UsePhotoModeReturn {
   redo: () => void;
   setBorderThickness: (val: number) => void;
   setEdgeTrim: (val: number) => void;
+  setSmoothOutline: (val: number) => void;
   setBottomFinish: (mode: 'flat' | 'rounded' | 'curved') => void;
   setBottomCurveRadius: (val: number) => void;
   cleanFragments: (minArea?: number) => void;
@@ -153,6 +155,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
   const [baseAiMask, setBaseAiMask] = useState<Uint8Array | null>(null);
   const [borderThickness, setBorderThicknessState] = useState<number>(20);
   const [edgeTrim, setEdgeTrimState] = useState<number>(0);
+  const [smoothOutline, setSmoothOutlineState] = useState<number>(0);
   const [bottomFinish, setBottomFinish] = useState<'flat' | 'rounded' | 'curved'>('flat');
   const [bottomCurveRadius, setBottomCurveRadiusState] = useState<number>(30);
   const [previewBg, setPreviewBg] = useState<'checker' | 'dark' | 'light' | 'saturated'>('checker');
@@ -215,10 +218,11 @@ export function usePhotoMode(): UsePhotoModeReturn {
       edgeTrim,
       bottomFinish,
       bottomCurveRadius,
+      smoothOutline,
     });
-    const res = composePhotoCutout(finishedMask, sourceImage.data, W, H, borderThickness);
+    const res = composePhotoCutout(finishedMask, sourceImage.data, W, H, borderThickness, 60, smoothOutline);
     setComposedResult(res);
-  }, [sourceImage, mask, borderThickness, edgeTrim, bottomFinish, bottomCurveRadius]);
+  }, [sourceImage, mask, borderThickness, edgeTrim, bottomFinish, bottomCurveRadius, smoothOutline]);
 
   // Load photo file
   const importPhoto = useCallback(async (file: File) => {
@@ -589,6 +593,10 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setEdgeTrimState(Math.max(0, Math.min(10, Math.round(val))));
   }, []);
 
+  const setSmoothOutline = useCallback((val: number) => {
+    setSmoothOutlineState(Math.max(0, Math.min(10, Math.round(val))));
+  }, []);
+
   const setBottomCurveRadius = useCallback((val: number) => {
     setBottomCurveRadiusState(Math.max(5, Math.min(100, Math.round(val))));
   }, []);
@@ -797,11 +805,12 @@ export function usePhotoMode(): UsePhotoModeReturn {
         edgeTrim,
         bottomFinish,
         bottomCurveRadius,
+        smoothOutline,
       },
     });
 
     downloadBlob(zipBlob, `${getBaseName()}.stickerstudio`);
-  }, [sourceImage, mask, borderThickness, previewBg, viewMode, personRegions, selectedRegionId, isReviewMode, manualDelta, edgeTrim, bottomFinish, bottomCurveRadius, getBaseName, downloadBlob]);
+  }, [sourceImage, mask, borderThickness, previewBg, viewMode, personRegions, selectedRegionId, isReviewMode, manualDelta, edgeTrim, bottomFinish, bottomCurveRadius, smoothOutline, getBaseName, downloadBlob]);
 
   // Load Photo Project
   const loadPhotoProject = useCallback((loaded: LoadedProjectData) => {
@@ -827,6 +836,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
       setIsReviewMode(loaded.metadata.photoSettings.isReviewMode ?? false);
       setSelectedRegionId(loaded.metadata.photoSettings.selectedRegionId ?? null);
       setEdgeTrimState(loaded.metadata.photoSettings.edgeTrim ?? 0);
+      setSmoothOutlineState(loaded.metadata.photoSettings.smoothOutline ?? 0);
       setBottomFinish(loaded.metadata.photoSettings.bottomFinish ?? 'flat');
       setBottomCurveRadiusState(loaded.metadata.photoSettings.bottomCurveRadius ?? 30);
 
@@ -871,6 +881,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setViewMode('sticker');
     setManualDelta(null);
     setEdgeTrimState(0);
+    setSmoothOutlineState(0);
     setBottomFinish('flat');
     setBottomCurveRadiusState(30);
     undoStackRef.current = [];
@@ -889,6 +900,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     toolMode,
     brushSize,
     edgeTrim,
+    smoothOutline,
     bottomFinish,
     bottomCurveRadius,
     touchesBottomEdge,
@@ -918,6 +930,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     redo,
     setBorderThickness,
     setEdgeTrim,
+    setSmoothOutline,
     setBottomFinish,
     setBottomCurveRadius,
     cleanFragments,

@@ -13,6 +13,7 @@ export interface PhotoFinishingOptions {
   edgeTrim?: number; // 0 to 10 px
   bottomFinish?: 'flat' | 'rounded' | 'curved';
   bottomCurveRadius?: number; // 5 to 100 px, default 30
+  smoothOutline?: number; // 0 to 10, default 0 (recommended 1-2 for portraits)
 }
 
 export interface PhotoComposedResult {
@@ -33,7 +34,8 @@ export function composePhotoCutout(
   sourceWidth: number,
   sourceHeight: number,
   borderThickness: number = 20,
-  padding: number = 60
+  padding: number = 60,
+  smoothOutline: number = 0
 ): PhotoComposedResult {
   // 1. Calculate bounding box of the mask in source coordinates
   let minX = sourceWidth;
@@ -114,6 +116,10 @@ export function composePhotoCutout(
     solidBacking: false,
     bridges: [],
     excludedFromExport: false,
+    backingOverride: smoothOutline > 0 ? {
+      groupId,
+      smoothingRadius: smoothOutline,
+    } : undefined,
   };
 
   // 3. Compute distance field for die-cut border
