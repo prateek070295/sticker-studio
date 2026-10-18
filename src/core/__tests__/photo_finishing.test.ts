@@ -351,70 +351,149 @@ describe('Photo Finishing — Alpha Edge Trimming, Bottom Treatment & Fragment C
       }
     });
 
-    it('smooths high-frequency jagged stair-steps and protrusions on outer border', () => {
+    it('reduces artificial spikes while preserving genuine important protrusions using source-aligned contour', () => {
       const mask = new Uint8Array(W * H);
       const sourceRgba = new Uint8ClampedArray(W * H * 4);
-      // Flat rectangular subject from x=30..60, y=30..70 with an isolated 2-pixel jagged spike at y=50, x=63
-      for (let y = 30; y < 70; y++) {
-        for (let x = 30; x <= 60; x++) {
+
+      // Subject body: x: 30..70, y: 30..80
+      for (let y = 30; y <= 80; y++) {
+        for (let x = 30; x <= 70; x++) {
           mask[y * W + x] = 1;
         }
       }
-      // Add jagged 3px spike at y=50, x=61..63
-      mask[50 * W + 61] = 1;
-      mask[50 * W + 62] = 1;
-      mask[50 * W + 63] = 1;
 
-      const res0 = composePhotoCutout(mask, sourceRgba, W, H, 10, 20, 0);
-      const res3 = composePhotoCutout(mask, sourceRgba, W, H, 10, 20, 3);
-
-      // Find the rightmost border pixel at y=50 for both
-      const getRightmostAtY = (rgba: Uint8ClampedArray, w: number, h: number, targetY: number) => {
-        let maxX = -1;
-        for (let x = 0; x < w; x++) {
-          if (rgba[(targetY * w + x) * 4 + 3] > 128) {
-            if (x > maxX) maxX = x;
-          }
+      // Genuine important protrusion: 10px wide, 15px long arm/lock on right side (x: 71..85, y: 55..65)
+      for (let y = 55; y <= 65; y++) {
+        for (let x = 71; x <= 85; x++) {
+          mask[y * W + x] = 1;
         }
-        return maxX;
+      }
+
+      // Artificial jagged spike: 1px wide, 3px long noise spike on right side (x: 71..73, y: 40)
+      for (let x = 71; x <= 73; x++) {
+        mask[40 * W + x] = 1;
+      }
+
+      const res0 = composePhotoCutout(mask, sourceRgba, W, H, 10, 25, 0);
+      const res3 = composePhotoCutout(mask, sourceRgba, W, H, 10, 25, 3);
+
+      const getSourceAlpha = (res: typeof res0, sx: number, sy: number) => {
+        const lx = sx - res.whiteBackedBounds.x;
+        const ly = sy - res.whiteBackedBounds.y;
+        if (lx < 0 || lx >= res.whiteBackedWidth || ly < 0 || ly >= res.whiteBackedHeight) return 0;
+        return res.whiteBackedRgba[(ly * res.whiteBackedWidth + lx) * 4 + 3];
       };
 
-      // Res0 will have a prominent circular protrusion around the spike
-      // Res3 will smooth the spike into the silhouette, reducing the protrusion
-      const cropY50_0 = getRightmostAtY(res0.whiteBackedRgba, res0.whiteBackedWidth, res0.whiteBackedHeight, Math.floor(res0.whiteBackedHeight / 2));
-      const cropY50_3 = getRightmostAtY(res3.whiteBackedRgba, res3.whiteBackedWidth, res3.whiteBackedHeight, Math.floor(res3.whiteBackedHeight / 2));
+      // Measure rightmost border reach at y=40 (artificial spike on right)
+      let maxSpikeX0 = 0;
+      let maxSpikeX3 = 0;
+      for (let sx = 70; sx < W; sx++) {
+        if (getSourceAlpha(res0, sx, 40) >= 128) maxSpikeX0 = sx;
+        if (getSourceAlpha(res3, sx, 40) >= 128) maxSpikeX3 = sx;
+      }
 
-      expect(cropY50_3).toBeLessThan(cropY50_0);
+      // Measure rightmost contour reach at y=60 (genuine protrusion on right)
+      let maxArmX0 = 0;
+      let maxArmX3 = 0;
+      for (let sx = 80; sx < W; sx++) {
+        if (getSourceAlpha(res0, sx, 60) >= 128) maxArmX0 = sx;
+        if (getSourceAlpha(res3, sx, 60) >= 128) maxArmX3 = sx;
+      }
+
+      // 1. Artificial spike protrusion is noticeably reduced by smoothing (pulled inward toward body)
+      expect(maxSpikeX3).toBeLessThan(maxSpikeX0);
+
+      // 2. Genuine important protrusion maintains its full macroscopic presence and margin
+      expect(maxArmX3).toBeGreaterThanOrEqual(85 + 9); // full arm (85) + margin (~10)
+      expect(Math.abs(maxArmX3 - maxArmX0)).toBeLessThanOrEqual(1);
     });
 
-    it('enforces safety enclosure invariant: all artwork pixels have full white backing underneath', () => {
+    it('enforces safety enclosure invariant: source-aligned white margin around sharp hair, corners, concave shapes, and image boundaries', () => {
       const mask = new Uint8Array(W * H);
       const sourceRgba = new Uint8ClampedArray(W * H * 4);
-      // Sharp single-pixel corner at (50, 20)
-      for (let y = 20; y < 80; y++) {
-        const halfWidth = Math.floor((y - 20) / 2);
-        for (let x = 50 - halfWidth; x <= 50 + halfWidth; x++) {
+
+      // 1. Main body
+      for (let y = 40; y <= 70; y++) {
+        for (let x = 40; x <= 70; x++) {
           mask[y * W + x] = 1;
-          const idx = (y * W + x) * 4;
-          sourceRgba[idx] = 100;
-          sourceRgba[idx + 1] = 150;
-          sourceRgba[idx + 2] = 200;
-          sourceRgba[idx + 3] = 255;
         }
       }
 
-      // Strong smoothing on a sharp cone
-      const res = composePhotoCutout(mask, sourceRgba, W, H, 5, 20, 5);
+      // 2. Sharp hair-like protrusion (1px wide, 15px long extending upward from y=39 to y=25 at x=55)
+      for (let y = 25; y < 40; y++) {
+        mask[y * W + 55] = 1;
+      }
 
-      // For every pixel in whiteBackedRgba that corresponds to artwork, alpha must be 255
-      expect(res.whiteBackedRgba.length).toBeGreaterThan(0);
-      let checked = 0;
-      for (let i = 0; i < W * H; i++) {
-        if (mask[i] === 1) {
-          checked++;
+      // 3. Sharp convex cone / corner at (25, 55)
+      for (let x = 25; x < 40; x++) {
+        const halfH = Math.floor((x - 25) / 2);
+        for (let y = 55 - halfH; y <= 55 + halfH; y++) {
+          mask[y * W + x] = 1;
         }
       }
-      expect(checked).toBeGreaterThan(100);
+
+      // 4. Concave notch cut into body at right side (x: 65..70, y: 52..58)
+      for (let y = 52; y <= 58; y++) {
+        for (let x = 65; x <= 70; x++) {
+          mask[y * W + x] = 0;
+        }
+      }
+
+      // 5. Artwork tip close to source image boundary at (5, 5) connected to body
+      for (let d = 0; d <= 35; d++) {
+        mask[(5 + d) * W + (5 + d)] = 1;
+      }
+
+      for (const border of [5, 10, 20]) {
+        for (const smooth of [1, 2, 5, 10]) {
+          const res = composePhotoCutout(mask, sourceRgba, W, H, border, 30, smooth);
+
+          const getSourceAlpha = (sx: number, sy: number) => {
+            const lx = sx - res.whiteBackedBounds.x;
+            const ly = sy - res.whiteBackedBounds.y;
+            if (lx < 0 || lx >= res.whiteBackedWidth || ly < 0 || ly >= res.whiteBackedHeight) return 0;
+            return res.whiteBackedRgba[(ly * res.whiteBackedWidth + lx) * 4 + 3];
+          };
+
+          // Check that every single artwork pixel has white backing underneath (alpha === 255)
+          let unbackedArtPixels = 0;
+          let checkedArtPixels = 0;
+          for (let y = 0; y < H; y++) {
+            for (let x = 0; x < W; x++) {
+              if (mask[y * W + x] === 1) {
+                checkedArtPixels++;
+                if (getSourceAlpha(x, y) < 255) {
+                  unbackedArtPixels++;
+                }
+              }
+            }
+          }
+          expect(checkedArtPixels).toBeGreaterThan(500);
+          expect(unbackedArtPixels).toBe(0);
+
+          // Verify hair tip at (55, 25) retains an adequate outer white cut contour margin
+          let hairMarginAbove = 0;
+          for (let y = 24; y >= 0; y--) {
+            if (getSourceAlpha(55, y) > 128) {
+              hairMarginAbove++;
+            } else {
+              break;
+            }
+          }
+          expect(hairMarginAbove).toBeGreaterThanOrEqual(2);
+
+          // Verify sharp cone tip at (25, 55) retains an adequate margin to the left
+          let coneMarginLeft = 0;
+          for (let x = 24; x >= 0; x--) {
+            if (getSourceAlpha(x, 55) > 128) {
+              coneMarginLeft++;
+            } else {
+              break;
+            }
+          }
+          expect(coneMarginLeft).toBeGreaterThanOrEqual(2);
+        }
+      }
     });
   });
 });

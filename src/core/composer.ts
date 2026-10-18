@@ -16,23 +16,25 @@ export interface ComposedSticker {
 }
 
 /**
- * Applies Signed Distance Field (SDF) contour smoothing to eliminate jagged staircase steps
+ * Applies distance-field contour smoothing to eliminate jagged staircase steps
  * and irregular protrusions along the die-cut backing silhouette.
- * Uses a 2-pass separable isotropic moving-average filter on the signed distance field,
- * extracting the smoothed 0-isocontour as the seed for Euclidean Distance Transform.
+ * Uses a 2-pass separable isotropic moving-average filter directly on the continuous
+ * Euclidean distance field, and enforces the safety enclosure invariant ensuring that
+ * all artwork pixels retain an adequate white border margin around them.
  */
 export function applyContourSmoothing(
-  mask: Uint8Array,
+  rawDist: Float32Array,
+  binarySeed: Uint8Array,
   width: number,
   height: number,
-  radius: number
-): Uint8Array {
-  if (radius <= 0) return mask;
+  radius: number,
+  borderThickness: number = 20
+): Float32Array {
+  if (radius <= 0) return rawDist;
 
-  const sdf = computeSignedDistanceField(mask, width, height);
   const r = Math.max(1, Math.min(25, Math.round(radius * 1.5)));
   const size = width * height;
-  let current = new Float32Array(sdf);
+  let current = new Float32Array(rawDist);
   const temp = new Float32Array(size);
   const out = new Float32Array(size);
 
@@ -73,13 +75,24 @@ export function applyContourSmoothing(
     current.set(out);
   }
 
-  // Extract 0-level set: <= 0 is foreground
-  const resultMask = new Uint8Array(size);
+  // Safety enclosure invariant:
+  // 1. All artwork pixels are guaranteed to have distance = 0 (fully inside backing)
+  // 2. All pixels within minMargin of artwork are guaranteed to be within the white die-cut border,
+  //    preventing sharp tips from having 0 margin or extending through the white outline.
+  const minMargin = Math.max(2, Math.min(borderThickness * 0.5, borderThickness - 2));
+  const maxAllowedDistNearArtwork = Math.max(0, borderThickness - minMargin);
+
+  const result = new Float32Array(size);
   for (let i = 0; i < size; i++) {
-    resultMask[i] = current[i] <= 0 ? 1 : 0;
+    if (binarySeed[i] === 1) {
+      result[i] = 0;
+    } else {
+      const safeBound = rawDist[i] + maxAllowedDistNearArtwork;
+      result[i] = Math.min(current[i], safeBound);
+    }
   }
 
-  return resultMask;
+  return result;
 }
 
 /**
@@ -94,7 +107,8 @@ export function buildGroupDistanceField(
   labelMap: Uint16Array,
   sheetWidth: number,
   sheetHeight: number,
-  padding: number = 60
+  padding: number = 60,
+  borderThickness?: number
 ): {
   distField: Float32Array;
   patchBounds: BoundingBox;
@@ -197,18 +211,20 @@ export function buildGroupDistanceField(
     }
   }
 
-  // 4. Contour smoothing
+  // 4. Compute local Euclidean Distance Transform
+  let distField = computeEuclideanDistanceTransform(binarySeed, localWidth, localHeight);
+
+  // 5. Contour smoothing directly on distance field
   if (group.backingOverride?.smoothingRadius && group.backingOverride.smoothingRadius > 0) {
-    binarySeed = applyContourSmoothing(
+    distField = applyContourSmoothing(
+      distField,
       binarySeed,
       localWidth,
       localHeight,
-      group.backingOverride.smoothingRadius
+      group.backingOverride.smoothingRadius,
+      borderThickness ?? 20
     );
   }
-
-  // 5. Compute local Euclidean Distance Transform
-  const distField = computeEuclideanDistanceTransform(binarySeed, localWidth, localHeight);
 
   return {
     distField,

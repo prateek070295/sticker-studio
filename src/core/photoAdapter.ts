@@ -130,7 +130,8 @@ export function composePhotoCutout(
     labelMap,
     sourceWidth,
     sourceHeight,
-    effectivePadding
+    effectivePadding,
+    borderThickness
   );
 
   // 4. Render White-Backed Sticker
