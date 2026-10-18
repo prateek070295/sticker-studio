@@ -87,6 +87,8 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
 
   // Interactive Box Move/Resize state
   const [boxDragMode, setBoxDragMode] = useState<'move' | 'resize-nw' | 'resize-ne' | 'resize-se' | 'resize-sw' | null>(null);
+  const [draftBox, setDraftBox] = useState<{ id: string; box: BoundingBox } | null>(null);
+  const draftBoxRef = useRef<{ id: string; box: BoundingBox } | null>(null);
   const boxDragStartRef = useRef<{ mouseX: number; mouseY: number; initialBox: BoundingBox } | null>(null);
 
   // Auto-fit image to container on initial load
@@ -245,6 +247,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
       if (clicked) {
         setSelectedRegionId(clicked.id);
         setBoxDragMode('move');
+        setDraftBox(null);
         boxDragStartRef.current = {
           mouseX: pt.x,
           mouseY: pt.y,
@@ -252,6 +255,8 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
         };
       } else {
         setSelectedRegionId(null);
+        setBoxDragMode(null);
+        setDraftBox(null);
       }
     }
   };
@@ -278,22 +283,47 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
       return;
     }
 
-    // Moving selected box
-    if (boxDragMode === 'move' && boxDragStartRef.current && selectedRegionId) {
+    // Moving or resizing selected box via draftBox (without mutating personRegions state in place!)
+    if (boxDragMode && boxDragStartRef.current && selectedRegionId) {
       const dx = pt.x - boxDragStartRef.current.mouseX;
       const dy = pt.y - boxDragStartRef.current.mouseY;
       const init = boxDragStartRef.current.initialBox;
       const W = sourceImage?.width ?? 2000;
       const H = sourceImage?.height ?? 2000;
 
-      const newX = Math.max(0, Math.min(W - init.width, init.x + dx));
-      const newY = Math.max(0, Math.min(H - init.height, init.y + dy));
-
-      // Local interactive preview
-      const reg = personRegions.find(r => r.id === selectedRegionId);
-      if (reg) {
-        reg.box = { ...init, x: newX, y: newY };
+      let newBox: BoundingBox;
+      if (boxDragMode === 'move') {
+        const newX = Math.max(0, Math.min(W - init.width, init.x + dx));
+        const newY = Math.max(0, Math.min(H - init.height, init.y + dy));
+        newBox = { ...init, x: newX, y: newY };
+      } else if (boxDragMode === 'resize-se') {
+        const newW = Math.max(20, Math.min(W - init.x, init.width + dx));
+        const newH = Math.max(20, Math.min(H - init.y, init.height + dy));
+        newBox = { ...init, width: newW, height: newH };
+      } else if (boxDragMode === 'resize-nw') {
+        const rawX = init.x + dx;
+        const newX = Math.max(0, Math.min(init.x + init.width - 20, rawX));
+        const newW = init.width - (newX - init.x);
+        const rawY = init.y + dy;
+        const newY = Math.max(0, Math.min(init.y + init.height - 20, rawY));
+        const newH = init.height - (newY - init.y);
+        newBox = { ...init, x: newX, y: newY, width: newW, height: newH };
+      } else if (boxDragMode === 'resize-ne') {
+        const rawY = init.y + dy;
+        const newY = Math.max(0, Math.min(init.y + init.height - 20, rawY));
+        const newH = init.height - (newY - init.y);
+        const newW = Math.max(20, Math.min(W - init.x, init.width + dx));
+        newBox = { ...init, y: newY, width: newW, height: newH };
+      } else { // resize-sw
+        const rawX = init.x + dx;
+        const newX = Math.max(0, Math.min(init.x + init.width - 20, rawX));
+        const newW = init.width - (newX - init.x);
+        const newH = Math.max(20, Math.min(H - init.y, init.height + dy));
+        newBox = { ...init, x: newX, width: newW, height: newH };
       }
+
+      draftBoxRef.current = { id: selectedRegionId, box: newBox };
+      setDraftBox({ id: selectedRegionId, box: newBox });
       return;
     }
 
@@ -319,13 +349,24 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
       return;
     }
 
-    // Finished moving selected box
+    // Finished moving or resizing selected box
     if (boxDragMode && selectedRegionId) {
-      const reg = personRegions.find(r => r.id === selectedRegionId);
-      if (reg) {
-        updatePersonRegion(selectedRegionId, reg.box);
+      const activeDraft = draftBoxRef.current || draftBox;
+      if (activeDraft && activeDraft.id === selectedRegionId) {
+        const init = boxDragStartRef.current?.initialBox;
+        if (
+          init &&
+          (init.x !== activeDraft.box.x ||
+            init.y !== activeDraft.box.y ||
+            init.width !== activeDraft.box.width ||
+            init.height !== activeDraft.box.height)
+        ) {
+          updatePersonRegion(selectedRegionId, activeDraft.box);
+        }
       }
       setBoxDragMode(null);
+      setDraftBox(null);
+      draftBoxRef.current = null;
       boxDragStartRef.current = null;
       return;
     }
@@ -380,7 +421,23 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
           isDrawingRef.current = false;
           setDrawBoxStart(null);
           setCurrentDrawBox(null);
+          const activeDraft = draftBoxRef.current || draftBox;
+          if (boxDragMode && selectedRegionId && activeDraft && activeDraft.id === selectedRegionId) {
+            const init = boxDragStartRef.current?.initialBox;
+            if (
+              init &&
+              (init.x !== activeDraft.box.x ||
+                init.y !== activeDraft.box.y ||
+                init.width !== activeDraft.box.width ||
+                init.height !== activeDraft.box.height)
+            ) {
+              updatePersonRegion(selectedRegionId, activeDraft.box);
+            }
+          }
           setBoxDragMode(null);
+          setDraftBox(null);
+          draftBoxRef.current = null;
+          boxDragStartRef.current = null;
           setCursorPos(c => ({ ...c, onCanvas: false }));
         }}
         onWheel={handleWheel}
@@ -414,15 +471,31 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                 const isSelected = region.id === selectedRegionId;
                 const isManual = region.isManual;
                 const isIncluded = region.included;
+                const displayBox = (draftBox && draftBox.id === region.id) ? draftBox.box : region.box;
 
                 return (
                   <div
                     key={region.id}
                     style={{
-                      left: `${region.box.x}px`,
-                      top: `${region.box.y}px`,
-                      width: `${region.box.width}px`,
-                      height: `${region.box.height}px`,
+                      left: `${displayBox.x}px`,
+                      top: `${displayBox.y}px`,
+                      width: `${displayBox.width}px`,
+                      height: `${displayBox.height}px`,
+                    }}
+                    onMouseDown={(e) => {
+                      if (e.button !== 0) return;
+                      e.stopPropagation();
+                      setSelectedRegionId(region.id);
+                      setToolMode('select-person');
+                      const pt = getCanvasCoords(e);
+                      setBoxDragMode('move');
+                      setDraftBox(null);
+                      draftBoxRef.current = null;
+                      boxDragStartRef.current = {
+                        mouseX: pt.x,
+                        mouseY: pt.y,
+                        initialBox: { ...region.box },
+                      };
                     }}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -431,14 +504,14 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                     }}
                     className={`absolute pointer-events-auto transition-all ${
                       isSelected
-                        ? 'ring-2 ring-white border-2 border-sky-400 bg-sky-400/15 z-20 shadow-lg'
+                        ? 'ring-2 ring-white border-2 border-sky-400 bg-sky-400/15 z-20 shadow-lg cursor-move'
                         : isManual
                         ? isIncluded
-                          ? 'border-2 border-pink-500 bg-pink-500/10 hover:bg-pink-500/20 z-10'
-                          : 'border-2 border-dashed border-slate-500 bg-slate-500/10 opacity-50 z-0'
+                          ? 'border-2 border-pink-500 bg-pink-500/10 hover:bg-pink-500/20 z-10 cursor-pointer'
+                          : 'border-2 border-dashed border-slate-500 bg-slate-500/10 opacity-50 z-0 cursor-pointer'
                         : isIncluded
-                        ? 'border-2 border-sky-400 bg-sky-400/10 hover:bg-sky-400/20 z-10'
-                        : 'border-2 border-dashed border-slate-500 bg-slate-500/10 opacity-50 z-0'
+                        ? 'border-2 border-sky-400 bg-sky-400/10 hover:bg-sky-400/20 z-10 cursor-pointer'
+                        : 'border-2 border-dashed border-slate-500 bg-slate-500/10 opacity-50 z-0 cursor-pointer'
                     }`}
                   >
                     {/* Person Badge & Controls Header */}
@@ -462,7 +535,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                           e.stopPropagation();
                           togglePersonIncluded(region.id);
                         }}
-                        className="p-0.5 hover:bg-black/20 rounded transition"
+                        className="p-0.5 hover:bg-black/20 rounded transition cursor-pointer"
                         title={region.included ? 'Exclude person' : 'Include person'}
                       >
                         {region.included ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
@@ -473,13 +546,75 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                             e.stopPropagation();
                             deletePersonRegion(region.id);
                           }}
-                          className="p-0.5 hover:bg-black/20 rounded transition text-red-200"
+                          className="p-0.5 hover:bg-black/20 rounded transition text-red-200 cursor-pointer"
                           title="Delete manual region"
                         >
                           <Trash2 className="w-3 h-3" />
                         </button>
                       )}
                     </div>
+
+                    {/* 4 Corner Resize Handles (Only for selected region) */}
+                    {isSelected && (
+                      <>
+                        <div
+                          onMouseDown={(e) => {
+                            if (e.button !== 0) return;
+                            e.stopPropagation();
+                            const pt = getCanvasCoords(e);
+                            setBoxDragMode('resize-nw');
+                            setDraftBox(null);
+                            draftBoxRef.current = null;
+                            boxDragStartRef.current = { mouseX: pt.x, mouseY: pt.y, initialBox: { ...displayBox } };
+                          }}
+                          className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-sky-600 rounded-xs cursor-nwse-resize z-30 shadow-sm"
+                          title="Resize Top-Left"
+                          data-testid="resize-handle-nw"
+                        />
+                        <div
+                          onMouseDown={(e) => {
+                            if (e.button !== 0) return;
+                            e.stopPropagation();
+                            const pt = getCanvasCoords(e);
+                            setBoxDragMode('resize-ne');
+                            setDraftBox(null);
+                            draftBoxRef.current = null;
+                            boxDragStartRef.current = { mouseX: pt.x, mouseY: pt.y, initialBox: { ...displayBox } };
+                          }}
+                          className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-sky-600 rounded-xs cursor-nesw-resize z-30 shadow-sm"
+                          title="Resize Top-Right"
+                          data-testid="resize-handle-ne"
+                        />
+                        <div
+                          onMouseDown={(e) => {
+                            if (e.button !== 0) return;
+                            e.stopPropagation();
+                            const pt = getCanvasCoords(e);
+                            setBoxDragMode('resize-se');
+                            setDraftBox(null);
+                            draftBoxRef.current = null;
+                            boxDragStartRef.current = { mouseX: pt.x, mouseY: pt.y, initialBox: { ...displayBox } };
+                          }}
+                          className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-sky-600 rounded-xs cursor-nwse-resize z-30 shadow-sm"
+                          title="Resize Bottom-Right"
+                          data-testid="resize-handle-se"
+                        />
+                        <div
+                          onMouseDown={(e) => {
+                            if (e.button !== 0) return;
+                            e.stopPropagation();
+                            const pt = getCanvasCoords(e);
+                            setBoxDragMode('resize-sw');
+                            setDraftBox(null);
+                            draftBoxRef.current = null;
+                            boxDragStartRef.current = { mouseX: pt.x, mouseY: pt.y, initialBox: { ...displayBox } };
+                          }}
+                          className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-sky-600 rounded-xs cursor-nesw-resize z-30 shadow-sm"
+                          title="Resize Bottom-Left"
+                          data-testid="resize-handle-sw"
+                        />
+                      </>
+                    )}
                   </div>
                 );
               })}

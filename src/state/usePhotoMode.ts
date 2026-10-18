@@ -69,7 +69,38 @@ export interface PhotoHistorySnapshot {
   manualDelta: Int8Array | null;
 }
 
-const MAX_HISTORY_DEPTH = 20;
+export const MAX_HISTORY_DEPTH = 20;
+export const MAX_HISTORY_BYTES = 80 * 1024 * 1024; // 80 MB history memory budget
+
+export function getSnapshotByteSize(snapshot: PhotoHistorySnapshot): number {
+  let bytes = snapshot.mask.byteLength;
+  if (snapshot.manualDelta) {
+    bytes += snapshot.manualDelta.byteLength;
+  }
+  for (const r of snapshot.personRegions) {
+    if (r.cropMask) {
+      bytes += r.cropMask.byteLength;
+    }
+  }
+  return bytes;
+}
+
+export function enforceHistoryBudget(
+  stack: PhotoHistorySnapshot[],
+  maxDepth: number = MAX_HISTORY_DEPTH,
+  maxBytes: number = MAX_HISTORY_BYTES
+): void {
+  while (stack.length > maxDepth) {
+    stack.shift();
+  }
+  let totalBytes = stack.reduce((sum, s) => sum + getSnapshotByteSize(s), 0);
+  while (stack.length > 1 && totalBytes > maxBytes) {
+    const evicted = stack.shift();
+    if (evicted) {
+      totalBytes -= getSnapshotByteSize(evicted);
+    }
+  }
+}
 
 function clonePersonRegions(regions: PersonRegion[]): PersonRegion[] {
   return regions.map(r => ({
@@ -137,9 +168,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
       manualDelta: manualDelta ? new Int8Array(manualDelta) : null,
     };
     undoStackRef.current.push(snapshot);
-    if (undoStackRef.current.length > MAX_HISTORY_DEPTH) {
-      undoStackRef.current.shift();
-    }
+    enforceHistoryBudget(undoStackRef.current, MAX_HISTORY_DEPTH, MAX_HISTORY_BYTES);
     redoStackRef.current = [];
     setHistoryVersion(v => v + 1);
   }, [mask, personRegions, selectedRegionId, manualDelta]);
@@ -498,9 +527,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
       manualDelta: manualDelta ? new Int8Array(manualDelta) : null,
     };
     redoStackRef.current.push(currentSnapshot);
-    if (redoStackRef.current.length > MAX_HISTORY_DEPTH) {
-      redoStackRef.current.shift();
-    }
+    enforceHistoryBudget(redoStackRef.current, MAX_HISTORY_DEPTH, MAX_HISTORY_BYTES);
 
     setMask(prev.mask);
     setPersonRegions(prev.personRegions);
@@ -522,9 +549,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
       manualDelta: manualDelta ? new Int8Array(manualDelta) : null,
     };
     undoStackRef.current.push(currentSnapshot);
-    if (undoStackRef.current.length > MAX_HISTORY_DEPTH) {
-      undoStackRef.current.shift();
-    }
+    enforceHistoryBudget(undoStackRef.current, MAX_HISTORY_DEPTH, MAX_HISTORY_BYTES);
 
     setMask(next.mask);
     setPersonRegions(next.personRegions);

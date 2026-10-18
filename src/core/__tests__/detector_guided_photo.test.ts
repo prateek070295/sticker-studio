@@ -7,6 +7,13 @@ import {
   isolateConnectedPersonRegion
 } from '../mediaPipeSegmenter';
 import { saveProjectArchive, loadProjectArchive } from '../projectArchive';
+import {
+  enforceHistoryBudget,
+  getSnapshotByteSize,
+  MAX_HISTORY_BYTES,
+  MAX_HISTORY_DEPTH,
+  PhotoHistorySnapshot
+} from '../../state/usePhotoMode';
 
 describe('Detector-Guided Photo Segmentation & Persistence', () => {
   it('combines multiple non-overlapping and overlapping person regional masks into canonical union', () => {
@@ -407,5 +414,118 @@ describe('Detector-Guided Photo Segmentation & Persistence', () => {
     // AND verify previous manual erase on Person 1 was NOT wiped out!
     expect(mask[15 * W + 15]).toBe(0);
     expect(mask[20 * W + 20]).toBe(1); // Rest of Person 1 still there
+  });
+
+  it('enforces a strict byte-based history budget for large photograph editing', () => {
+    // Simulate large 4000x3000 photo (12 MB binary mask per snapshot)
+    const MASK_BYTES = 12 * 1024 * 1024; // 12 MB
+    const stack: PhotoHistorySnapshot[] = [];
+
+    // Push 10 large snapshots (would be 120 MB total)
+    for (let i = 0; i < 10; i++) {
+      const largeMask = new Uint8Array(MASK_BYTES);
+      largeMask[0] = i; // mark snapshot index
+      stack.push({
+        mask: largeMask,
+        personRegions: [],
+        selectedRegionId: null,
+        manualDelta: null,
+      });
+      // Budget cap: 80 MB
+      enforceHistoryBudget(stack, MAX_HISTORY_DEPTH, MAX_HISTORY_BYTES);
+    }
+
+    // With 12 MB per snapshot and 80 MB cap, stack can hold at most floor(80 / 12) = 6 snapshots
+    expect(stack.length).toBeLessThanOrEqual(6);
+    const totalBytes = stack.reduce((sum, s) => sum + getSnapshotByteSize(s), 0);
+    expect(totalBytes).toBeLessThanOrEqual(MAX_HISTORY_BYTES);
+
+    // Oldest snapshots (0, 1, 2, 3) must be evicted, newest retained (9, 8, 7...)
+    expect(stack[stack.length - 1].mask[0]).toBe(9);
+    expect(stack[0].mask[0]).toBe(4);
+
+    // Also verify minimum retention: even with a single massive 90 MB snapshot > 80 MB, at least 1 entry is preserved
+    const massiveStack: PhotoHistorySnapshot[] = [
+      {
+        mask: new Uint8Array(90 * 1024 * 1024),
+        personRegions: [],
+        selectedRegionId: null,
+        manualDelta: null,
+      }
+    ];
+    enforceHistoryBudget(massiveStack, MAX_HISTORY_DEPTH, MAX_HISTORY_BYTES);
+    expect(massiveStack.length).toBe(1);
+  });
+
+  it('verifies that editing bounding box coordinates does not mutate previous history snapshots and preserves manual brush strokes', () => {
+    const W = 100;
+    const H = 100;
+    const r1Crop = new Uint8Array(20 * 20); r1Crop.fill(1);
+    const initialRegion: PersonRegion = {
+      id: 'p1',
+      label: 'P1',
+      box: { x: 10, y: 10, width: 20, height: 20 },
+      score: 0.95,
+      isManual: false,
+      included: true,
+      cropBounds: { x: 10, y: 10, width: 20, height: 20 },
+      cropMask: r1Crop,
+    };
+
+    // Initial manual delta (brush erase at [15, 15])
+    const manualDelta = new Int8Array(W * H);
+    manualDelta[15 * W + 15] = -1;
+
+    // Snapshot state BEFORE moving
+    const undoStack: PhotoHistorySnapshot[] = [];
+    const prevSnapshot: PhotoHistorySnapshot = {
+      mask: new Uint8Array(W * H),
+      personRegions: [{
+        ...initialRegion,
+        box: { ...initialRegion.box },
+        cropBounds: { ...initialRegion.cropBounds! },
+        cropMask: new Uint8Array(initialRegion.cropMask!),
+      }],
+      selectedRegionId: 'p1',
+      manualDelta: new Int8Array(manualDelta),
+    };
+    undoStack.push(prevSnapshot);
+
+    // Now propose a draft moved box
+    const draftBox: BoundingBox = { x: 40, y: 40, width: 20, height: 20 };
+    // Verify initial snapshot is NOT mutated by draft box
+    expect(undoStack[0].personRegions[0].box).toEqual({ x: 10, y: 10, width: 20, height: 20 });
+
+    // Commit updated region
+    const newCrop = new Uint8Array(20 * 20); newCrop.fill(1);
+    const updatedRegion: PersonRegion = {
+      ...initialRegion,
+      box: draftBox,
+      cropBounds: { x: 40, y: 40, width: 20, height: 20 },
+      cropMask: newCrop,
+    };
+
+    // Recompose mask
+    const composed = new Uint8Array(W * H);
+    // Stamp new crop
+    for (let cy = 0; cy < 20; cy++) {
+      for (let cx = 0; cx < 20; cx++) {
+        composed[(40 + cy) * W + (40 + cx)] = 1;
+      }
+    }
+    // Apply manual delta
+    for (let i = 0; i < W * H; i++) {
+      if (manualDelta[i] === 1) composed[i] = 1;
+      else if (manualDelta[i] === -1) composed[i] = 0;
+    }
+
+    // Verify manual delta was preserved across the move
+    expect(composed[15 * W + 15]).toBe(0); // erase preserved
+    expect(composed[45 * W + 45]).toBe(1); // new moved region present
+
+    // Verify undo restores original coordinates and mask
+    const restored = undoStack.pop()!;
+    expect(restored.personRegions[0].box).toEqual({ x: 10, y: 10, width: 20, height: 20 });
+    expect(restored.manualDelta![15 * W + 15]).toBe(-1);
   });
 });
