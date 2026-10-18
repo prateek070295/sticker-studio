@@ -232,6 +232,9 @@ export interface ProjectMetadata {
     selectedRegionId?: string | null;
     isReviewMode?: boolean;
     manualDelta?: string;
+    edgeTrim?: number;
+    bottomFinish?: 'flat' | 'rounded' | 'curved';
+    bottomCurveRadius?: number;
   };
 }
 

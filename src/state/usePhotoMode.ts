@@ -1,6 +1,12 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { PhotoToolMode, PhotoViewMode, PersonRegion, SerializedPersonRegion, BoundingBox } from '../types';
-import { composePhotoCutout, PhotoComposedResult } from '../core/photoAdapter';
+import {
+  composePhotoCutout,
+  PhotoComposedResult,
+  applyPhotoFinishing,
+  cleanStrayFragments,
+  maskTouchesBottom
+} from '../core/photoAdapter';
 import { applyBrushStroke } from '../core/maskPatch';
 import { saveProjectArchive, LoadedProjectData } from '../core/projectArchive';
 import {
@@ -25,6 +31,10 @@ export interface UsePhotoModeReturn {
   viewMode: PhotoViewMode;
   toolMode: PhotoToolMode;
   brushSize: number;
+  edgeTrim: number;
+  bottomFinish: 'flat' | 'rounded' | 'curved';
+  bottomCurveRadius: number;
+  touchesBottomEdge: boolean;
   isProcessing: boolean;
   progressMessage: string;
   modelStatus: 'idle' | 'loading' | 'ready' | 'error';
@@ -50,6 +60,10 @@ export interface UsePhotoModeReturn {
   undo: () => void;
   redo: () => void;
   setBorderThickness: (val: number) => void;
+  setEdgeTrim: (val: number) => void;
+  setBottomFinish: (mode: 'flat' | 'rounded' | 'curved') => void;
+  setBottomCurveRadius: (val: number) => void;
+  cleanFragments: (minArea?: number) => void;
   setPreviewBg: (bg: 'checker' | 'dark' | 'light' | 'saturated') => void;
   setViewMode: (mode: PhotoViewMode) => void;
   setToolMode: (mode: PhotoToolMode) => void;
@@ -138,6 +152,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
   const [mask, setMask] = useState<Uint8Array | null>(null);
   const [baseAiMask, setBaseAiMask] = useState<Uint8Array | null>(null);
   const [borderThickness, setBorderThicknessState] = useState<number>(20);
+  const [edgeTrim, setEdgeTrimState] = useState<number>(0);
+  const [bottomFinish, setBottomFinish] = useState<'flat' | 'rounded' | 'curved'>('flat');
+  const [bottomCurveRadius, setBottomCurveRadiusState] = useState<number>(30);
   const [previewBg, setPreviewBg] = useState<'checker' | 'dark' | 'light' | 'saturated'>('checker');
   const [viewMode, setViewMode] = useState<PhotoViewMode>('sticker');
   const [toolMode, setToolMode] = useState<PhotoToolMode>('pan');
@@ -185,7 +202,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
       });
   }, [sourceImage]);
 
-  // Recompose sticker whenever mask, sourceImage, or borderThickness changes
+  // Recompose sticker whenever mask, sourceImage, borderThickness, or finishing options change
   useEffect(() => {
     if (!sourceImage || !mask) {
       setComposedResult(null);
@@ -194,9 +211,14 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
     const W = sourceImage.width;
     const H = sourceImage.height;
-    const res = composePhotoCutout(mask, sourceImage.data, W, H, borderThickness);
+    const finishedMask = applyPhotoFinishing(mask, W, H, {
+      edgeTrim,
+      bottomFinish,
+      bottomCurveRadius,
+    });
+    const res = composePhotoCutout(finishedMask, sourceImage.data, W, H, borderThickness);
     setComposedResult(res);
-  }, [sourceImage, mask, borderThickness]);
+  }, [sourceImage, mask, borderThickness, edgeTrim, bottomFinish, bottomCurveRadius]);
 
   // Load photo file
   const importPhoto = useCallback(async (file: File) => {
@@ -563,6 +585,43 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setBorderThicknessState(Math.max(0, Math.min(100, Math.round(val))));
   }, []);
 
+  const setEdgeTrim = useCallback((val: number) => {
+    setEdgeTrimState(Math.max(0, Math.min(10, Math.round(val))));
+  }, []);
+
+  const setBottomCurveRadius = useCallback((val: number) => {
+    setBottomCurveRadiusState(Math.max(5, Math.min(100, Math.round(val))));
+  }, []);
+
+  const touchesBottomEdge = useMemo(() => {
+    if (!sourceImage || !mask) return false;
+    return maskTouchesBottom(mask, sourceImage.width, sourceImage.height, 3);
+  }, [sourceImage, mask]);
+
+  const cleanFragments = useCallback((minArea: number = 200) => {
+    if (!sourceImage || !mask) return;
+    const W = sourceImage.width;
+    const H = sourceImage.height;
+    const { cleanedMask, removedCount } = cleanStrayFragments(mask, W, H, minArea);
+    if (removedCount > 0) {
+      pushUndoSnapshot();
+      setMask(cleanedMask);
+      if (manualDelta) {
+        const nextDelta = new Int8Array(manualDelta);
+        for (let i = 0; i < W * H; i++) {
+          if (mask[i] > 0 && cleanedMask[i] === 0) {
+            nextDelta[i] = -1;
+          }
+        }
+        setManualDelta(nextDelta);
+      }
+      setHistoryVersion(v => v + 1);
+      setProgressMessage(`Cleaned ${removedCount} stray fragment${removedCount > 1 ? 's' : ''}.`);
+    } else {
+      setProgressMessage('No stray fragments found.');
+    }
+  }, [sourceImage, mask, manualDelta, pushUndoSnapshot]);
+
   const getBaseName = useCallback(() => {
     return fileName.replace(/\.[^/.]+$/, '');
   }, [fileName]);
@@ -727,7 +786,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
       globalSolidBacking: false,
       globalWhiteBacking: true,
       projectType: 'photo',
-      photoSettings: {
+        photoSettings: {
         borderThickness,
         previewBg,
         hasRemovedBackground: true,
@@ -736,11 +795,14 @@ export function usePhotoMode(): UsePhotoModeReturn {
         selectedRegionId,
         isReviewMode,
         manualDelta: manualDeltaBase64,
+        edgeTrim,
+        bottomFinish,
+        bottomCurveRadius,
       },
     });
 
     downloadBlob(zipBlob, `${getBaseName()}.stickerstudio`);
-  }, [sourceImage, mask, borderThickness, previewBg, viewMode, personRegions, selectedRegionId, isReviewMode, manualDelta, getBaseName, downloadBlob]);
+  }, [sourceImage, mask, borderThickness, previewBg, viewMode, personRegions, selectedRegionId, isReviewMode, manualDelta, edgeTrim, bottomFinish, bottomCurveRadius, getBaseName, downloadBlob]);
 
   // Load Photo Project
   const loadPhotoProject = useCallback((loaded: LoadedProjectData) => {
@@ -765,6 +827,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
       }
       setIsReviewMode(loaded.metadata.photoSettings.isReviewMode ?? false);
       setSelectedRegionId(loaded.metadata.photoSettings.selectedRegionId ?? null);
+      setEdgeTrimState(loaded.metadata.photoSettings.edgeTrim ?? 0);
+      setBottomFinish(loaded.metadata.photoSettings.bottomFinish ?? 'flat');
+      setBottomCurveRadiusState(loaded.metadata.photoSettings.bottomCurveRadius ?? 30);
 
       if (loaded.metadata.photoSettings.manualDelta) {
         const u8 = base64ToUint8(loaded.metadata.photoSettings.manualDelta);
@@ -806,6 +871,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setStageTimings({});
     setViewMode('sticker');
     setManualDelta(null);
+    setEdgeTrimState(0);
+    setBottomFinish('flat');
+    setBottomCurveRadiusState(30);
     undoStackRef.current = [];
     redoStackRef.current = [];
     setHistoryVersion(v => v + 1);
@@ -821,6 +889,10 @@ export function usePhotoMode(): UsePhotoModeReturn {
     viewMode,
     toolMode,
     brushSize,
+    edgeTrim,
+    bottomFinish,
+    bottomCurveRadius,
+    touchesBottomEdge,
     isProcessing,
     progressMessage,
     modelStatus,
@@ -846,6 +918,10 @@ export function usePhotoMode(): UsePhotoModeReturn {
     undo,
     redo,
     setBorderThickness,
+    setEdgeTrim,
+    setBottomFinish,
+    setBottomCurveRadius,
+    cleanFragments,
     setPreviewBg,
     setViewMode,
     setToolMode,

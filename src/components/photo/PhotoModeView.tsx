@@ -54,6 +54,14 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
     applyStroke,
     undo,
     setBorderThickness,
+    setEdgeTrim,
+    setBottomFinish,
+    setBottomCurveRadius,
+    cleanFragments,
+    edgeTrim,
+    bottomFinish,
+    bottomCurveRadius,
+    touchesBottomEdge,
     setPreviewBg,
     setViewMode,
     setToolMode,
@@ -991,6 +999,15 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                   />
                 </div>
               )}
+
+              <button
+                onClick={() => cleanFragments()}
+                className="w-full py-1.5 px-2 bg-white hover:bg-neutral-100 text-neutral-700 border border-neutral-300 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition"
+                title="Remove small disconnected background speckles and stray fragments"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                <span>Clean Stray Fragments</span>
+              </button>
             </div>
           )}
 
@@ -1016,6 +1033,92 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                 <span>30 px</span>
                 <span>60 px (Thick die-cut)</span>
               </div>
+            </div>
+          )}
+
+          {/* 6. Edge Defringe / Alpha Trimming Slider */}
+          {mask && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-neutral-700 uppercase tracking-wider">
+                  Edge Defringe
+                </span>
+                <span className="font-mono text-neutral-600 font-semibold">{edgeTrim} px</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="10"
+                value={edgeTrim}
+                onChange={(e) => setEdgeTrim(Number(e.target.value))}
+                className="w-full accent-sky-500 h-1.5 bg-neutral-200 rounded-lg cursor-pointer"
+              />
+              <div className="flex justify-between text-[10px] text-neutral-400">
+                <span>0 px (Original)</span>
+                <span>1-2 px (Subtle halo trim)</span>
+                <span>10 px (Deep)</span>
+              </div>
+            </div>
+          )}
+
+          {/* 7. Bottom Edge Treatment (Photo Cutoff) */}
+          {mask && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-neutral-700 uppercase tracking-wider">
+                  Bottom Finish
+                </span>
+                {touchesBottomEdge && (
+                  <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-semibold rounded">
+                    Photo Cutoff
+                  </span>
+                )}
+              </div>
+              <div className="grid grid-cols-3 gap-1 p-1 bg-neutral-100 rounded-xl border border-neutral-200">
+                <button
+                  onClick={() => setBottomFinish('flat')}
+                  className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                    bottomFinish === 'flat' ? 'bg-white shadow-xs text-neutral-900 font-semibold' : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
+                  title="Retain flat straight bottom edge"
+                >
+                  Flat
+                </button>
+                <button
+                  onClick={() => setBottomFinish('rounded')}
+                  className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                    bottomFinish === 'rounded' ? 'bg-white shadow-xs text-neutral-900 font-semibold' : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
+                  title="Softly round bottom-left and bottom-right corners"
+                >
+                  Rounded
+                </button>
+                <button
+                  onClick={() => setBottomFinish('curved')}
+                  className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                    bottomFinish === 'curved' ? 'bg-white shadow-xs text-neutral-900 font-semibold' : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
+                  title="Smooth upward arch at bottom"
+                >
+                  Curved
+                </button>
+              </div>
+              {bottomFinish !== 'flat' && (
+                <div className="space-y-1 pt-1">
+                  <div className="flex justify-between text-xs text-neutral-600">
+                    <span>{bottomFinish === 'rounded' ? 'Corner Radius' : 'Arch Height'}</span>
+                    <span className="font-mono">{bottomCurveRadius} px</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="10"
+                    max="80"
+                    value={bottomCurveRadius}
+                    onChange={(e) => setBottomCurveRadius(Number(e.target.value))}
+                    className="w-full accent-sky-500 h-1.5 bg-neutral-200 rounded-lg cursor-pointer"
+                  />
+                </div>
+              )}
             </div>
           )}
 
