@@ -500,10 +500,11 @@ export function usePhotoMode(): UsePhotoModeReturn {
       const bh = patch.bounds.height;
       for (let dy = 0; dy < bh; dy++) {
         for (let dx = 0; dx < bw; dx++) {
-          const pIdx = dy * bw + dx;
-          if (patch.afterAlpha[pIdx] !== patch.beforeAlpha[pIdx]) {
-            const gIdx = (by + dy) * W + (bx + dx);
-            nextDelta[gIdx] = (mode === 'restore' ? 1 : -1);
+          const gIdx = (by + dy) * W + (bx + dx);
+          const oldVal = mask[gIdx] > 0 ? 1 : 0;
+          const newVal = updatedMask[gIdx];
+          if (newVal !== oldVal) {
+            nextDelta[gIdx] = (newVal === 1 ? 1 : -1);
           }
         }
       }

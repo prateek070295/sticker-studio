@@ -472,6 +472,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                 const isManual = region.isManual;
                 const isIncluded = region.included;
                 const displayBox = (draftBox && draftBox.id === region.id) ? draftBox.box : region.box;
+                const isSelectPersonMode = toolMode === 'select-person';
 
                 return (
                   <div
@@ -483,10 +484,9 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                       height: `${displayBox.height}px`,
                     }}
                     onMouseDown={(e) => {
-                      if (e.button !== 0) return;
+                      if (!isSelectPersonMode || e.button !== 0) return;
                       e.stopPropagation();
                       setSelectedRegionId(region.id);
-                      setToolMode('select-person');
                       const pt = getCanvasCoords(e);
                       setBoxDragMode('move');
                       setDraftBox(null);
@@ -498,26 +498,36 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                       };
                     }}
                     onClick={(e) => {
+                      if (!isSelectPersonMode) return;
                       e.stopPropagation();
                       setSelectedRegionId(region.id);
-                      setToolMode('select-person');
                     }}
-                    className={`absolute pointer-events-auto transition-all ${
+                    className={`absolute transition-all ${
+                      isSelectPersonMode ? 'pointer-events-auto' : 'pointer-events-none'
+                    } ${
                       isSelected
-                        ? 'ring-2 ring-white border-2 border-sky-400 bg-sky-400/15 z-20 shadow-lg cursor-move'
+                        ? isSelectPersonMode
+                          ? 'ring-2 ring-white border-2 border-sky-400 bg-sky-400/15 z-20 shadow-lg cursor-move'
+                          : 'ring-2 ring-white border-2 border-sky-400 bg-sky-400/15 z-20 shadow-lg'
                         : isManual
                         ? isIncluded
-                          ? 'border-2 border-pink-500 bg-pink-500/10 hover:bg-pink-500/20 z-10 cursor-pointer'
-                          : 'border-2 border-dashed border-slate-500 bg-slate-500/10 opacity-50 z-0 cursor-pointer'
+                          ? isSelectPersonMode
+                            ? 'border-2 border-pink-500 bg-pink-500/10 hover:bg-pink-500/20 z-10 cursor-pointer'
+                            : 'border-2 border-pink-500 bg-pink-500/10 z-10'
+                          : 'border-2 border-dashed border-slate-500 bg-slate-500/10 opacity-50 z-0'
                         : isIncluded
-                        ? 'border-2 border-sky-400 bg-sky-400/10 hover:bg-sky-400/20 z-10 cursor-pointer'
-                        : 'border-2 border-dashed border-slate-500 bg-slate-500/10 opacity-50 z-0 cursor-pointer'
+                        ? isSelectPersonMode
+                          ? 'border-2 border-sky-400 bg-sky-400/10 hover:bg-sky-400/20 z-10 cursor-pointer'
+                          : 'border-2 border-sky-400 bg-sky-400/10 z-10'
+                        : 'border-2 border-dashed border-slate-500 bg-slate-500/10 opacity-50 z-0'
                     }`}
                   >
                     {/* Person Badge & Controls Header */}
                     <div
                       style={{ transform: 'translateY(-100%)' }}
                       className={`absolute top-0 left-0 flex items-center gap-1.5 px-2 py-0.5 rounded-t-md text-[11px] font-bold shadow-md whitespace-nowrap ${
+                        isSelectPersonMode ? 'pointer-events-auto' : 'pointer-events-none'
+                      } ${
                         isSelected
                           ? 'bg-sky-500 text-white'
                           : isManual
@@ -530,32 +540,36 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                       }`}
                     >
                       <span>{region.label}</span>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          togglePersonIncluded(region.id);
-                        }}
-                        className="p-0.5 hover:bg-black/20 rounded transition cursor-pointer"
-                        title={region.included ? 'Exclude person' : 'Include person'}
-                      >
-                        {region.included ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
-                      </button>
-                      {region.isManual && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deletePersonRegion(region.id);
-                          }}
-                          className="p-0.5 hover:bg-black/20 rounded transition text-red-200 cursor-pointer"
-                          title="Delete manual region"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
+                      {isSelectPersonMode && (
+                        <>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              togglePersonIncluded(region.id);
+                            }}
+                            className="p-0.5 hover:bg-black/20 rounded transition cursor-pointer"
+                            title={region.included ? 'Exclude person' : 'Include person'}
+                          >
+                            {region.included ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+                          </button>
+                          {region.isManual && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deletePersonRegion(region.id);
+                              }}
+                              className="p-0.5 hover:bg-black/20 rounded transition text-red-200 cursor-pointer"
+                              title="Delete manual region"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          )}
+                        </>
                       )}
                     </div>
 
-                    {/* 4 Corner Resize Handles (Only for selected region) */}
-                    {isSelected && (
+                    {/* 4 Corner Resize Handles (Only for selected region in select-person mode) */}
+                    {isSelected && isSelectPersonMode && (
                       <>
                         <div
                           onMouseDown={(e) => {
@@ -567,7 +581,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                             draftBoxRef.current = null;
                             boxDragStartRef.current = { mouseX: pt.x, mouseY: pt.y, initialBox: { ...displayBox } };
                           }}
-                          className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-sky-600 rounded-xs cursor-nwse-resize z-30 shadow-sm"
+                          className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-sky-600 rounded-xs cursor-nwse-resize z-30 shadow-sm pointer-events-auto"
                           title="Resize Top-Left"
                           data-testid="resize-handle-nw"
                         />
@@ -581,7 +595,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                             draftBoxRef.current = null;
                             boxDragStartRef.current = { mouseX: pt.x, mouseY: pt.y, initialBox: { ...displayBox } };
                           }}
-                          className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-sky-600 rounded-xs cursor-nesw-resize z-30 shadow-sm"
+                          className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-sky-600 rounded-xs cursor-nesw-resize z-30 shadow-sm pointer-events-auto"
                           title="Resize Top-Right"
                           data-testid="resize-handle-ne"
                         />
@@ -595,7 +609,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                             draftBoxRef.current = null;
                             boxDragStartRef.current = { mouseX: pt.x, mouseY: pt.y, initialBox: { ...displayBox } };
                           }}
-                          className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-sky-600 rounded-xs cursor-nwse-resize z-30 shadow-sm"
+                          className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-sky-600 rounded-xs cursor-nwse-resize z-30 shadow-sm pointer-events-auto"
                           title="Resize Bottom-Right"
                           data-testid="resize-handle-se"
                         />
@@ -609,7 +623,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                             draftBoxRef.current = null;
                             boxDragStartRef.current = { mouseX: pt.x, mouseY: pt.y, initialBox: { ...displayBox } };
                           }}
-                          className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-sky-600 rounded-xs cursor-nesw-resize z-30 shadow-sm"
+                          className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-sky-600 rounded-xs cursor-nesw-resize z-30 shadow-sm pointer-events-auto"
                           title="Resize Bottom-Left"
                           data-testid="resize-handle-sw"
                         />
