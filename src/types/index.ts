@@ -231,6 +231,7 @@ export interface ProjectMetadata {
     personRegions?: SerializedPersonRegion[];
     selectedRegionId?: string | null;
     isReviewMode?: boolean;
+    manualDelta?: string;
   };
 }
 

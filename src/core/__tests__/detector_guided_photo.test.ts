@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { BoundingBox, PersonRegion, SerializedPersonRegion } from '../../types';
-import { combinePersonRegions } from '../mediaPipeSegmenter';
+import {
+  combinePersonRegions,
+  DEFAULT_MIN_PERSON_AREA_RATIO,
+  filterPersonCandidate,
+  isolateConnectedPersonRegion
+} from '../mediaPipeSegmenter';
 import { saveProjectArchive, loadProjectArchive } from '../projectArchive';
 
 describe('Detector-Guided Photo Segmentation & Persistence', () => {
@@ -222,5 +227,185 @@ describe('Detector-Guided Photo Segmentation & Persistence', () => {
     // Verify alphaMask restored exactly
     expect(loaded.alphaMask[25 * W + 20]).toBe(255);
     expect(loaded.alphaMask[0]).toBe(0);
+  });
+
+  it('proves that a small 0.1%-area person candidate survives filtering and is marked uncertain for user review', () => {
+    const totalArea = 1200 * 800; // 960,000 pixels
+    // 0.1% of total area is 960 pixels (e.g. 30 x 32 box)
+    const smallBox: BoundingBox = { x: 500, y: 300, width: 30, height: 32 }; // 960 pixels = 0.0010 ratio (0.10%)
+    
+    // Test with default threshold (0.0008 = 0.08%)
+    const result = filterPersonCandidate(smallBox, totalArea, 0.45, DEFAULT_MIN_PERSON_AREA_RATIO);
+    expect(result.keep).toBe(true); // Must survive!
+    expect(result.isUncertain).toBe(true); // Marked uncertain for review because < 0.25%
+
+    // A tiny noise box of 0.05% (e.g. 480 pixels) should be filtered out
+    const noiseBox: BoundingBox = { x: 100, y: 100, width: 20, height: 24 }; // 480 pixels = 0.0005 ratio (0.05%)
+    const noiseResult = filterPersonCandidate(noiseBox, totalArea, 0.45, DEFAULT_MIN_PERSON_AREA_RATIO);
+    expect(noiseResult.keep).toBe(false); // Discarded as noise
+  });
+
+  it('demonstrates neighbor disconnected-island suppression while preserving touching connected subjects', () => {
+    const cropW = 60;
+    const cropH = 60;
+    const rawCropMask = new Uint8Array(cropW * cropH);
+
+    // Person A in core box [15..35, 15..45]
+    for (let y = 15; y < 45; y++) {
+      for (let x = 15; x < 35; x++) {
+        rawCropMask[y * cropW + x] = 1;
+      }
+    }
+
+    // Person B: Touching Person A at x=35 with a wrist/arm bridge [35..38, 25..28]
+    // and expanding into margin [38..52, 20..48]
+    for (let y = 25; y < 28; y++) {
+      for (let x = 35; x < 38; x++) {
+        rawCropMask[y * cropW + x] = 1;
+      }
+    }
+    for (let y = 20; y < 48; y++) {
+      for (let x = 38; x < 52; x++) {
+        rawCropMask[y * cropW + x] = 1;
+      }
+    }
+
+    // Island C: Disconnected background clutter in the margin at [5..10, 5..10]
+    for (let y = 5; y < 10; y++) {
+      for (let x = 5; x < 10; x++) {
+        rawCropMask[y * cropW + x] = 1;
+      }
+    }
+
+    const coreBoxInCrop: BoundingBox = { x: 15, y: 15, width: 20, height: 30 };
+    const cleaned = isolateConnectedPersonRegion(rawCropMask, cropW, cropH, coreBoxInCrop);
+
+    // 1. Person A pixels are preserved
+    expect(cleaned[20 * cropW + 20]).toBe(1);
+
+    // 2. Touching Person B is preserved (BFS preserves single connected foreground component; no severed limbs)
+    expect(cleaned[26 * cropW + 36]).toBe(1); // bridge
+    expect(cleaned[30 * cropW + 45]).toBe(1); // Person B body
+
+    // 3. Disconnected Island C in the margin is discarded
+    expect(cleaned[7 * cropW + 7]).toBe(0);
+    expect(cleaned[5 * cropW + 5]).toBe(0);
+  });
+
+  it('verifies region editing undo/redo and manual brush correction reconciliation', () => {
+    const W = 100;
+    const H = 100;
+
+    // Helper functions mirroring state reconciliation
+    function cloneRegions(regions: PersonRegion[]): PersonRegion[] {
+      return regions.map(r => ({
+        ...r,
+        box: { ...r.box },
+        cropBounds: r.cropBounds ? { ...r.cropBounds } : undefined,
+        cropMask: r.cropMask ? new Uint8Array(r.cropMask) : undefined,
+      }));
+    }
+
+    function composeMask(regions: PersonRegion[], delta: Int8Array | null): Uint8Array {
+      const base = combinePersonRegions(regions, W, H);
+      if (!delta) return base;
+      const out = new Uint8Array(W * H);
+      for (let i = 0; i < W * H; i++) {
+        if (delta[i] === 1) out[i] = 1;
+        else if (delta[i] === -1) out[i] = 0;
+        else out[i] = base[i];
+      }
+      return out;
+    }
+
+    // Initial State: Person 1 at [10..30, 10..30] and Person 2 at [50..70, 50..70]
+    const m1 = new Uint8Array(20 * 20); m1.fill(1);
+    const m2 = new Uint8Array(20 * 20); m2.fill(1);
+    const r1: PersonRegion = {
+      id: 'p1', label: 'P1', box: { x: 10, y: 10, width: 20, height: 20 },
+      score: 0.9, isManual: false, included: true,
+      cropBounds: { x: 10, y: 10, width: 20, height: 20 }, cropMask: m1
+    };
+    const r2: PersonRegion = {
+      id: 'p2', label: 'P2', box: { x: 50, y: 50, width: 20, height: 20 },
+      score: 0.85, isManual: false, included: true,
+      cropBounds: { x: 50, y: 50, width: 20, height: 20 }, cropMask: m2
+    };
+
+    let regions = [r1, r2];
+    let manualDelta: Int8Array | null = null;
+    let mask = composeMask(regions, manualDelta);
+
+    interface Snapshot {
+      mask: Uint8Array;
+      regions: PersonRegion[];
+      manualDelta: Int8Array | null;
+    }
+
+    const undoStack: Snapshot[] = [];
+    const redoStack: Snapshot[] = [];
+
+    const pushState = () => {
+      undoStack.push({
+        mask: new Uint8Array(mask),
+        regions: cloneRegions(regions),
+        manualDelta: manualDelta ? new Int8Array(manualDelta) : null,
+      });
+      redoStack.length = 0;
+    };
+
+    // 1. Exclude person 2
+    pushState();
+    regions = regions.map(r => r.id === 'p2' ? { ...r, included: false } : r);
+    mask = composeMask(regions, manualDelta);
+    expect(mask[60 * W + 60]).toBe(0); // Person 2 excluded
+
+    // Undo exclusion
+    const undoItem1 = undoStack.pop()!;
+    redoStack.push({
+      mask: new Uint8Array(mask),
+      regions: cloneRegions(regions),
+      manualDelta: manualDelta ? new Int8Array(manualDelta) : null,
+    });
+    regions = undoItem1.regions;
+    mask = undoItem1.mask;
+    expect(regions.find(r => r.id === 'p2')?.included).toBe(true);
+    expect(mask[60 * W + 60]).toBe(1); // Person 2 restored
+
+    // Redo exclusion
+    const redoItem1 = redoStack.pop()!;
+    undoStack.push({
+      mask: new Uint8Array(mask),
+      regions: cloneRegions(regions),
+      manualDelta: manualDelta ? new Int8Array(manualDelta) : null,
+    });
+    regions = redoItem1.regions;
+    mask = redoItem1.mask;
+    expect(regions.find(r => r.id === 'p2')?.included).toBe(false);
+    expect(mask[60 * W + 60]).toBe(0);
+
+    // 2. Perform manual erase on Person 1 at [15, 15]
+    pushState();
+    manualDelta = new Int8Array(W * H);
+    manualDelta[15 * W + 15] = -1; // erased
+    mask = composeMask(regions, manualDelta);
+    expect(mask[15 * W + 15]).toBe(0);
+
+    // 3. Now add a new manual region 3 at [80..90, 80..90]
+    pushState();
+    const m3 = new Uint8Array(10 * 10); m3.fill(1);
+    const r3: PersonRegion = {
+      id: 'manual_3', label: 'Manual 1', box: { x: 80, y: 80, width: 10, height: 10 },
+      score: 1.0, isManual: true, included: true,
+      cropBounds: { x: 80, y: 80, width: 10, height: 10 }, cropMask: m3
+    };
+    regions = [...regions, r3];
+    mask = composeMask(regions, manualDelta);
+
+    // Verify Region 3 is present
+    expect(mask[85 * W + 85]).toBe(1);
+    // AND verify previous manual erase on Person 1 was NOT wiped out!
+    expect(mask[15 * W + 15]).toBe(0);
+    expect(mask[20 * W + 20]).toBe(1); // Rest of Person 1 still there
   });
 });

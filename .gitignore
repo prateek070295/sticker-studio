@@ -15,6 +15,7 @@ test-output/
 .photo-review-handoff/
 docs/diagnosis*/
 scripts/photo_prototype/models/
+scripts/photo_prototype/vendor/
 *.bin
 
 # Logs

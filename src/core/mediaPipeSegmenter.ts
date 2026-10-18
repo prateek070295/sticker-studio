@@ -72,13 +72,41 @@ export interface SegmentPhotoResult {
   height: number;
 }
 
+export const DEFAULT_MIN_PERSON_AREA_RATIO = 0.0008; // 0.08% of total photo area
+export const UNCERTAIN_AREA_THRESHOLD_RATIO = 0.0025; // 0.25% of total photo area
+export const UNCERTAIN_SCORE_THRESHOLD = 0.25; // Score below which candidate is flagged uncertain
+export const DEFAULT_CROP_MARGIN_RATIO = 0.20; // 20% margin around bounding box to capture extended limbs & hair
+
+export interface PersonCropResult {
+  cropMask: Uint8Array;
+  cropBounds: BoundingBox;
+  fgCount: number;
+  width: number;
+  height: number;
+}
+
+export function filterPersonCandidate(
+  box: BoundingBox,
+  totalArea: number,
+  score: number = 0.5,
+  minAreaFraction: number = DEFAULT_MIN_PERSON_AREA_RATIO
+): { keep: boolean; isUncertain: boolean } {
+  const area = box.width * box.height;
+  const ratio = area / totalArea;
+  if (ratio < minAreaFraction) {
+    return { keep: false, isUncertain: true };
+  }
+  const isUncertain = (ratio < UNCERTAIN_AREA_THRESHOLD_RATIO) || (score < UNCERTAIN_SCORE_THRESHOLD);
+  return { keep: true, isUncertain };
+}
+
 /**
  * Detect candidate people in a photo using MediaPipe EfficientDet-Lite0.
  * Sorts detected boxes left-to-right for consistent user ordering (P1, P2, ...).
  */
 export async function detectPeopleInPhoto(
   sourceImage: ImageData,
-  minAreaFraction: number = 0.0008,
+  minAreaFraction: number = DEFAULT_MIN_PERSON_AREA_RATIO,
   onProgress?: (message: string) => void
 ): Promise<PersonRegion[]> {
   onProgress?.('Initializing local person detector...');
@@ -108,17 +136,15 @@ export async function detectPeopleInPhoto(
     const b = det.boundingBox;
     if (!b) continue;
 
-    const area = b.width * b.height;
-    if (area / totalArea < minAreaFraction) continue; // Skip tiny noise below 0.08% image area
-
     // Clamp to image dimensions
     const x = Math.max(0, Math.min(W - 1, Math.round(b.originX)));
     const y = Math.max(0, Math.min(H - 1, Math.round(b.originY)));
     const w = Math.max(1, Math.min(W - x, Math.round(b.width)));
     const h = Math.max(1, Math.min(H - y, Math.round(b.height)));
-
     const score = cat.score ?? 0.5;
-    const isUncertain = (area / totalArea < 0.0025) || (score < 0.25);
+
+    const { keep, isUncertain } = filterPersonCandidate({ x, y, width: w, height: h }, totalArea, score, minAreaFraction);
+    if (!keep) continue;
 
     personBoxes.push({
       box: { x, y, width: w, height: h },
@@ -149,7 +175,7 @@ export async function detectPeopleInPhoto(
 export async function segmentPersonCrop(
   sourceImage: ImageData,
   region: PersonRegion,
-  marginPercent: number = 0.20
+  marginPercent: number = DEFAULT_CROP_MARGIN_RATIO
 ): Promise<{ cropMask: Uint8Array; cropBounds: BoundingBox; fgCount: number }> {
   const segmenter = await getMediaPipeSegmenter();
   const W = sourceImage.width;
@@ -237,11 +263,47 @@ export async function segmentPersonCrop(
     }
   }
 
-  // Neighbor Isolation: Keep only components connected to the core person bounding box
+  // Neighbor Disconnected-Island Suppression
   const cMinX = Math.max(0, region.box.x - cropX);
-  const cMaxX = Math.min(cropW - 1, region.box.x + region.box.width - cropX);
   const cMinY = Math.max(0, region.box.y - cropY);
-  const cMaxY = Math.min(cropH - 1, region.box.y + region.box.height - cropY);
+  const coreBoxInCrop: BoundingBox = {
+    x: cMinX,
+    y: cMinY,
+    width: Math.min(cropW - cMinX, region.box.width),
+    height: Math.min(cropH - cMinY, region.box.height),
+  };
+
+  const cleanCropMask = isolateConnectedPersonRegion(rawCropMask, cropW, cropH, coreBoxInCrop);
+
+  let fgCount = 0;
+  for (let i = 0; i < cleanCropMask.length; i++) {
+    if (cleanCropMask[i] > 0) fgCount++;
+  }
+
+  return { cropMask: cleanCropMask, cropBounds, fgCount };
+}
+
+/**
+ * Neighbor Disconnected-Island Suppression using 8-way connected BFS flood fill.
+ * Seeds all foreground pixels inside the core detection bounding box.
+ * This removes detached background noise and non-touching neighbor fragments in the crop margin.
+ *
+ * NOTE ON TOUCHING SUBJECTS:
+ * If two subjects physically touch (e.g. holding hands, carrying children, shoulder-to-shoulder),
+ * they form a single connected foreground component. This flood-fill preserves their shared silhouette
+ * rather than attempting artificial instance separation or making arbitrary cuts through limbs.
+ * Ambiguous touching regions are preserved for manual review and brush adjustment.
+ */
+export function isolateConnectedPersonRegion(
+  rawCropMask: Uint8Array,
+  cropW: number,
+  cropH: number,
+  coreBoxInCrop: BoundingBox
+): Uint8Array {
+  const cMinX = Math.max(0, coreBoxInCrop.x);
+  const cMaxX = Math.min(cropW - 1, coreBoxInCrop.x + coreBoxInCrop.width);
+  const cMinY = Math.max(0, coreBoxInCrop.y);
+  const cMaxY = Math.min(cropH - 1, coreBoxInCrop.y + coreBoxInCrop.height);
 
   const cleanCropMask = new Uint8Array(cropW * cropH);
   const visited = new Uint8Array(cropW * cropH);
@@ -285,12 +347,7 @@ export async function segmentPersonCrop(
     }
   }
 
-  let fgCount = 0;
-  for (let i = 0; i < cleanCropMask.length; i++) {
-    if (cleanCropMask[i] > 0) fgCount++;
-  }
-
-  return { cropMask: cleanCropMask, cropBounds, fgCount };
+  return cleanCropMask;
 }
 
 /**

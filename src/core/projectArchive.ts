@@ -54,6 +54,7 @@ export interface ProjectSaveState {
     personRegions?: import('../types').SerializedPersonRegion[];
     selectedRegionId?: string | null;
     isReviewMode?: boolean;
+    manualDelta?: string;
   };
 }
 

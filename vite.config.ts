@@ -15,11 +15,27 @@ export default defineConfig({
       registerType: 'prompt',
       injectRegister: false,
       workbox: {
-        globPatterns: ['**/*.{js,mjs,css,html,ico,png,svg,jpg,jpeg,webp,wasm,tflite}'],
+        globPatterns: ['**/*.{js,mjs,css,html,ico,png,svg,jpg,jpeg,webp}'],
         maximumFileSizeToCacheInBytes: 25 * 1024 * 1024,
         navigateFallback: 'index.html',
         cleanupOutdatedCaches: true,
         clientsClaim: true,
+        runtimeCaching: [
+          {
+            urlPattern: ({ url }) => url.pathname.includes('/mediapipe/'),
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'mediapipe-photo-models',
+              expiration: {
+                maxEntries: 10,
+                maxAgeSeconds: 60 * 24 * 60 * 60, // 60 days
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
+        ],
       },
       manifest: {
         name: 'Sticker Studio — Sheet Extractor',

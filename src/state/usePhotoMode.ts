@@ -9,7 +9,9 @@ import {
   getMediaPipeDetector,
   detectPeopleInPhoto,
   segmentPersonCrop,
-  combinePersonRegions
+  combinePersonRegions,
+  DEFAULT_MIN_PERSON_AREA_RATIO,
+  DEFAULT_CROP_MARGIN_RATIO
 } from '../core/mediaPipeSegmenter';
 import JSZip from 'jszip';
 
@@ -60,6 +62,45 @@ export interface UsePhotoModeReturn {
   resetPhoto: () => void;
 }
 
+export interface PhotoHistorySnapshot {
+  mask: Uint8Array;
+  personRegions: PersonRegion[];
+  selectedRegionId: string | null;
+  manualDelta: Int8Array | null;
+}
+
+const MAX_HISTORY_DEPTH = 20;
+
+function clonePersonRegions(regions: PersonRegion[]): PersonRegion[] {
+  return regions.map(r => ({
+    ...r,
+    box: { ...r.box },
+    cropBounds: r.cropBounds ? { ...r.cropBounds } : undefined,
+    cropMask: r.cropMask ? new Uint8Array(r.cropMask) : undefined,
+  }));
+}
+
+function composeCompositeMask(
+  regions: PersonRegion[],
+  W: number,
+  H: number,
+  delta: Int8Array | null
+): Uint8Array {
+  const base = combinePersonRegions(regions, W, H);
+  if (!delta) return base;
+  const out = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) {
+    if (delta[i] === 1) {
+      out[i] = 1;
+    } else if (delta[i] === -1) {
+      out[i] = 0;
+    } else {
+      out[i] = base[i];
+    }
+  }
+  return out;
+}
+
 export function usePhotoMode(): UsePhotoModeReturn {
   const [sourceImage, setSourceImage] = useState<ImageData | null>(null);
   const [fileName, setFileName] = useState<string>('photo.jpg');
@@ -80,11 +121,28 @@ export function usePhotoMode(): UsePhotoModeReturn {
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
   const [isReviewMode, setIsReviewMode] = useState<boolean>(false);
   const [stageTimings, setStageTimings] = useState<Record<string, number>>({});
+  const [manualDelta, setManualDelta] = useState<Int8Array | null>(null);
 
-  // Undo / Redo history
-  const undoStackRef = useRef<Uint8Array[]>([]);
-  const redoStackRef = useRef<Uint8Array[]>([]);
+  // Undo / Redo history with coherent snapshots (mask, personRegions, selection, manualDelta)
+  const undoStackRef = useRef<PhotoHistorySnapshot[]>([]);
+  const redoStackRef = useRef<PhotoHistorySnapshot[]>([]);
   const [historyVersion, setHistoryVersion] = useState<number>(0);
+
+  const pushUndoSnapshot = useCallback(() => {
+    if (!mask) return;
+    const snapshot: PhotoHistorySnapshot = {
+      mask: new Uint8Array(mask),
+      personRegions: clonePersonRegions(personRegions),
+      selectedRegionId,
+      manualDelta: manualDelta ? new Int8Array(manualDelta) : null,
+    };
+    undoStackRef.current.push(snapshot);
+    if (undoStackRef.current.length > MAX_HISTORY_DEPTH) {
+      undoStackRef.current.shift();
+    }
+    redoStackRef.current = [];
+    setHistoryVersion(v => v + 1);
+  }, [mask, personRegions, selectedRegionId, manualDelta]);
 
   useEffect(() => {
     if (!sourceImage) return;
@@ -153,6 +211,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setSelectedRegionId(null);
     setIsReviewMode(false);
     setStageTimings({});
+    setManualDelta(null);
     undoStackRef.current = [];
     redoStackRef.current = [];
     setHistoryVersion(v => v + 1);
@@ -169,7 +228,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
     try {
       const tDet0 = performance.now();
-      const detected = await detectPeopleInPhoto(sourceImage, 0.003, (msg) => {
+      const detected = await detectPeopleInPhoto(sourceImage, DEFAULT_MIN_PERSON_AREA_RATIO, (msg) => {
         setProgressMessage(msg);
       });
       timings.detectionMs = performance.now() - tDet0;
@@ -187,10 +246,11 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
         const newMask = new Uint8Array(singleResult.mask);
         setBaseAiMask(new Uint8Array(newMask));
-        if (mask) undoStackRef.current.push(new Uint8Array(mask));
+        if (mask) pushUndoSnapshot();
         setMask(newMask);
         setPersonRegions([]);
         setSelectedRegionId(null);
+        setManualDelta(null);
         setIsReviewMode(true);
         setViewMode('sticker');
         setStageTimings(timings);
@@ -205,7 +265,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
       for (let i = 0; i < detected.length; i++) {
         const reg = detected[i];
         setProgressMessage(`Segmenting person ${i + 1} of ${detected.length}...`);
-        const { cropMask, cropBounds } = await segmentPersonCrop(sourceImage, reg, 0.20);
+        const { cropMask, cropBounds } = await segmentPersonCrop(sourceImage, reg, DEFAULT_CROP_MARGIN_RATIO);
         processedRegions.push({
           ...reg,
           cropMask,
@@ -220,11 +280,12 @@ export function usePhotoMode(): UsePhotoModeReturn {
       timings.unionMs = performance.now() - tUnion0;
       timings.totalMs = performance.now() - tTotal0;
 
-      if (mask) undoStackRef.current.push(new Uint8Array(mask));
+      if (mask) pushUndoSnapshot();
       setMask(combinedMask);
       setBaseAiMask(new Uint8Array(combinedMask));
       setPersonRegions(processedRegions);
       setSelectedRegionId(processedRegions[0]?.id ?? null);
+      setManualDelta(null);
       setIsReviewMode(true);
       setViewMode('sticker');
       setStageTimings(timings);
@@ -238,7 +299,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     } finally {
       setIsProcessing(false);
     }
-  }, [sourceImage, mask]);
+  }, [sourceImage, mask, pushUndoSnapshot]);
 
   // General removeBackground: delegates to detectPeople
   const removeBackground = useCallback(async () => {
@@ -267,14 +328,14 @@ export function usePhotoMode(): UsePhotoModeReturn {
         included: true,
       };
 
-      const { cropMask, cropBounds } = await segmentPersonCrop(sourceImage, newRegion, 0.20);
+      const { cropMask, cropBounds } = await segmentPersonCrop(sourceImage, newRegion, DEFAULT_CROP_MARGIN_RATIO);
       newRegion.cropMask = cropMask;
       newRegion.cropBounds = cropBounds;
 
       const updatedRegions = [...personRegions, newRegion];
-      const combinedMask = combinePersonRegions(updatedRegions, W, H);
+      const combinedMask = composeCompositeMask(updatedRegions, W, H, manualDelta);
 
-      if (mask) undoStackRef.current.push(new Uint8Array(mask));
+      if (mask) pushUndoSnapshot();
       setMask(combinedMask);
       setPersonRegions(updatedRegions);
       setSelectedRegionId(newRegion.id);
@@ -289,7 +350,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     } finally {
       setIsProcessing(false);
     }
-  }, [sourceImage, personRegions, mask]);
+  }, [sourceImage, personRegions, mask, manualDelta, pushUndoSnapshot]);
 
   // Update Person Region Bounds (Move/Resize) and Re-segment
   const updatePersonRegion = useCallback(async (id: string, newBox: BoundingBox) => {
@@ -305,16 +366,16 @@ export function usePhotoMode(): UsePhotoModeReturn {
       const H = sourceImage.height;
 
       const targetRegion = { ...personRegions[regionIdx], box: newBox };
-      const { cropMask, cropBounds } = await segmentPersonCrop(sourceImage, targetRegion, 0.20);
+      const { cropMask, cropBounds } = await segmentPersonCrop(sourceImage, targetRegion, DEFAULT_CROP_MARGIN_RATIO);
       targetRegion.cropMask = cropMask;
       targetRegion.cropBounds = cropBounds;
 
       const updated = [...personRegions];
       updated[regionIdx] = targetRegion;
 
-      const combinedMask = combinePersonRegions(updated, W, H);
+      const combinedMask = composeCompositeMask(updated, W, H, manualDelta);
 
-      if (mask) undoStackRef.current.push(new Uint8Array(mask));
+      if (mask) pushUndoSnapshot();
       setMask(combinedMask);
       setPersonRegions(updated);
       setSelectedRegionId(id);
@@ -326,7 +387,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     } finally {
       setIsProcessing(false);
     }
-  }, [sourceImage, personRegions, mask]);
+  }, [sourceImage, personRegions, mask, manualDelta, pushUndoSnapshot]);
 
   // Delete Person Region
   const deletePersonRegion = useCallback((id: string) => {
@@ -334,16 +395,16 @@ export function usePhotoMode(): UsePhotoModeReturn {
     const updated = personRegions.filter(r => r.id !== id);
     const W = sourceImage.width;
     const H = sourceImage.height;
-    const combinedMask = combinePersonRegions(updated, W, H);
+    const combinedMask = composeCompositeMask(updated, W, H, manualDelta);
 
-    if (mask) undoStackRef.current.push(new Uint8Array(mask));
+    if (mask) pushUndoSnapshot();
     setMask(combinedMask);
     setPersonRegions(updated);
     if (selectedRegionId === id) setSelectedRegionId(null);
     redoStackRef.current = [];
     setHistoryVersion(v => v + 1);
     setProgressMessage(`Removed region. ${updated.filter(r => r.included).length} people selected.`);
-  }, [sourceImage, personRegions, mask, selectedRegionId]);
+  }, [sourceImage, personRegions, mask, selectedRegionId, manualDelta, pushUndoSnapshot]);
 
   // Toggle Person Included
   const togglePersonIncluded = useCallback((id: string) => {
@@ -351,16 +412,16 @@ export function usePhotoMode(): UsePhotoModeReturn {
     const updated = personRegions.map(r => (r.id === id ? { ...r, included: !r.included } : r));
     const W = sourceImage.width;
     const H = sourceImage.height;
-    const combinedMask = combinePersonRegions(updated, W, H);
+    const combinedMask = composeCompositeMask(updated, W, H, manualDelta);
 
-    if (mask) undoStackRef.current.push(new Uint8Array(mask));
+    if (mask) pushUndoSnapshot();
     setMask(combinedMask);
     setPersonRegions(updated);
     redoStackRef.current = [];
     setHistoryVersion(v => v + 1);
     const count = updated.filter(r => r.included).length;
     setProgressMessage(`${count} people selected. Review the image and add anyone missing before creating your sticker.`);
-  }, [sourceImage, personRegions, mask]);
+  }, [sourceImage, personRegions, mask, manualDelta, pushUndoSnapshot]);
 
   // Rerun Person Segmentation for selected region
   const rerunPersonSegmentation = useCallback(async (id: string) => {
@@ -395,36 +456,82 @@ export function usePhotoMode(): UsePhotoModeReturn {
     );
 
     if (patch) {
-      undoStackRef.current.push(new Uint8Array(mask));
-      redoStackRef.current = [];
+      if (mask) pushUndoSnapshot();
 
       const updatedMask = new Uint8Array(W * H);
       for (let i = 0; i < W * H; i++) {
         updatedMask[i] = currentAlpha[i] >= 128 ? 1 : 0;
       }
 
+      // Update manualDelta so brush strokes persist across future region edits
+      const nextDelta = manualDelta ? new Int8Array(manualDelta) : new Int8Array(W * H);
+      const bx = patch.bounds.x;
+      const by = patch.bounds.y;
+      const bw = patch.bounds.width;
+      const bh = patch.bounds.height;
+      for (let dy = 0; dy < bh; dy++) {
+        for (let dx = 0; dx < bw; dx++) {
+          const pIdx = dy * bw + dx;
+          if (patch.afterAlpha[pIdx] !== patch.beforeAlpha[pIdx]) {
+            const gIdx = (by + dy) * W + (bx + dx);
+            nextDelta[gIdx] = (mode === 'restore' ? 1 : -1);
+          }
+        }
+      }
+
+      setManualDelta(nextDelta);
       setMask(updatedMask);
       setHistoryVersion(v => v + 1);
     }
-  }, [sourceImage, mask, brushSize]);
+  }, [sourceImage, mask, brushSize, manualDelta, pushUndoSnapshot]);
 
   // Undo
   const undo = useCallback(() => {
     if (undoStackRef.current.length === 0 || !mask) return;
     const prev = undoStackRef.current.pop()!;
-    redoStackRef.current.push(new Uint8Array(mask));
-    setMask(prev);
+
+    // Push current to redo
+    const currentSnapshot: PhotoHistorySnapshot = {
+      mask: new Uint8Array(mask),
+      personRegions: clonePersonRegions(personRegions),
+      selectedRegionId,
+      manualDelta: manualDelta ? new Int8Array(manualDelta) : null,
+    };
+    redoStackRef.current.push(currentSnapshot);
+    if (redoStackRef.current.length > MAX_HISTORY_DEPTH) {
+      redoStackRef.current.shift();
+    }
+
+    setMask(prev.mask);
+    setPersonRegions(prev.personRegions);
+    setSelectedRegionId(prev.selectedRegionId);
+    setManualDelta(prev.manualDelta);
     setHistoryVersion(v => v + 1);
-  }, [mask]);
+  }, [mask, personRegions, selectedRegionId, manualDelta]);
 
   // Redo
   const redo = useCallback(() => {
     if (redoStackRef.current.length === 0 || !mask) return;
     const next = redoStackRef.current.pop()!;
-    undoStackRef.current.push(new Uint8Array(mask));
-    setMask(next);
+
+    // Push current to undo
+    const currentSnapshot: PhotoHistorySnapshot = {
+      mask: new Uint8Array(mask),
+      personRegions: clonePersonRegions(personRegions),
+      selectedRegionId,
+      manualDelta: manualDelta ? new Int8Array(manualDelta) : null,
+    };
+    undoStackRef.current.push(currentSnapshot);
+    if (undoStackRef.current.length > MAX_HISTORY_DEPTH) {
+      undoStackRef.current.shift();
+    }
+
+    setMask(next.mask);
+    setPersonRegions(next.personRegions);
+    setSelectedRegionId(next.selectedRegionId);
+    setManualDelta(next.manualDelta);
     setHistoryVersion(v => v + 1);
-  }, [mask]);
+  }, [mask, personRegions, selectedRegionId, manualDelta]);
 
   const setBorderThickness = useCallback((val: number) => {
     setBorderThicknessState(Math.max(0, Math.min(100, Math.round(val))));
@@ -571,6 +678,11 @@ export function usePhotoMode(): UsePhotoModeReturn {
       maskData: r.cropMask ? uint8ToBase64(r.cropMask) : undefined,
     }));
 
+    let manualDeltaBase64: string | undefined = undefined;
+    if (manualDelta) {
+      manualDeltaBase64 = uint8ToBase64(new Uint8Array(manualDelta.buffer, manualDelta.byteOffset, manualDelta.byteLength));
+    }
+
     const zipBlob = await saveProjectArchive({
       name: getBaseName(),
       sourceImage,
@@ -597,11 +709,12 @@ export function usePhotoMode(): UsePhotoModeReturn {
         personRegions: serializedRegions,
         selectedRegionId,
         isReviewMode,
+        manualDelta: manualDeltaBase64,
       },
     });
 
     downloadBlob(zipBlob, `${getBaseName()}.stickerstudio`);
-  }, [sourceImage, mask, borderThickness, previewBg, viewMode, personRegions, selectedRegionId, isReviewMode, getBaseName, downloadBlob]);
+  }, [sourceImage, mask, borderThickness, previewBg, viewMode, personRegions, selectedRegionId, isReviewMode, manualDelta, getBaseName, downloadBlob]);
 
   // Load Photo Project
   const loadPhotoProject = useCallback((loaded: LoadedProjectData) => {
@@ -626,6 +739,13 @@ export function usePhotoMode(): UsePhotoModeReturn {
       }
       setIsReviewMode(loaded.metadata.photoSettings.isReviewMode ?? false);
       setSelectedRegionId(loaded.metadata.photoSettings.selectedRegionId ?? null);
+
+      if (loaded.metadata.photoSettings.manualDelta) {
+        const u8 = base64ToUint8(loaded.metadata.photoSettings.manualDelta);
+        setManualDelta(new Int8Array(u8.buffer, u8.byteOffset, u8.byteLength));
+      } else {
+        setManualDelta(null);
+      }
 
       if (loaded.metadata.photoSettings.personRegions && loaded.metadata.photoSettings.personRegions.length > 0) {
         const restoredRegions: PersonRegion[] = loaded.metadata.photoSettings.personRegions.map(sr => ({
@@ -659,6 +779,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setIsReviewMode(false);
     setStageTimings({});
     setViewMode('sticker');
+    setManualDelta(null);
     undoStackRef.current = [];
     redoStackRef.current = [];
     setHistoryVersion(v => v + 1);
