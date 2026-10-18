@@ -4,7 +4,7 @@
  * and outputs print-ready transparent RGBA buffers.
  */
 
-import { computeEuclideanDistanceTransform } from './edt';
+import { computeEuclideanDistanceTransform, computeSignedDistanceField } from './edt';
 import { rasterizeBridge } from './bridging';
 import { ArtworkComponent, BoundingBox, StickerGroup } from '../types';
 
@@ -16,53 +16,83 @@ export interface ComposedSticker {
 }
 
 /**
- * Applies a separable morphological filter to smooth jagged raster steps along silhouette contours.
+ * Applies distance-field contour smoothing to eliminate jagged staircase steps
+ * and irregular protrusions along the die-cut backing silhouette.
+ * Uses a 2-pass separable isotropic moving-average filter directly on the continuous
+ * Euclidean distance field, and enforces the safety enclosure invariant ensuring that
+ * all artwork pixels retain an adequate white border margin around them.
  */
-function applyContourSmoothing(mask: Uint8Array, width: number, height: number, radius: number): Uint8Array {
-  if (radius <= 0) return mask;
-  const temp = new Float32Array(width * height);
-  const out = new Uint8Array(width * height);
-  const r = Math.min(10, Math.round(radius));
+export function applyContourSmoothing(
+  rawDist: Float32Array,
+  binarySeed: Uint8Array,
+  width: number,
+  height: number,
+  radius: number,
+  borderThickness: number = 20
+): Float32Array {
+  if (radius <= 0) return rawDist;
 
-  // Horizontal blur pass
-  for (let y = 0; y < height; y++) {
-    const rowOffset = y * width;
-    let sum = 0;
-    for (let x = 0; x < width; x++) {
-      if (x === 0) {
-        for (let k = -r; k <= r; k++) {
-          const px = Math.max(0, Math.min(width - 1, k));
-          sum += mask[rowOffset + px];
-        }
-      } else {
+  const r = Math.max(1, Math.min(25, Math.round(radius * 1.5)));
+  const size = width * height;
+  let current = new Float32Array(rawDist);
+  const temp = new Float32Array(size);
+  const out = new Float32Array(size);
+
+  // 2 passes of moving average approximates an isotropic Gaussian filter
+  for (let pass = 0; pass < 2; pass++) {
+    // Horizontal blur pass
+    for (let y = 0; y < height; y++) {
+      const rowOffset = y * width;
+      let sum = 0;
+      for (let k = -r; k <= r; k++) {
+        const px = Math.max(0, Math.min(width - 1, k));
+        sum += current[rowOffset + px];
+      }
+      temp[rowOffset] = sum / (2 * r + 1);
+      for (let x = 1; x < width; x++) {
         const drop = Math.max(0, x - r - 1);
         const add = Math.min(width - 1, x + r);
-        sum += mask[rowOffset + add] - mask[rowOffset + drop];
+        sum += current[rowOffset + add] - current[rowOffset + drop];
+        temp[rowOffset + x] = sum / (2 * r + 1);
       }
-      temp[rowOffset + x] = sum / (2 * r + 1);
     }
-  }
 
-  // Vertical blur pass & thresholding at 0.5
-  for (let x = 0; x < width; x++) {
-    let sum = 0;
-    for (let y = 0; y < height; y++) {
-      if (y === 0) {
-        for (let k = -r; k <= r; k++) {
-          const py = Math.max(0, Math.min(height - 1, k));
-          sum += temp[py * width + x];
-        }
-      } else {
+    // Vertical blur pass
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      for (let k = -r; k <= r; k++) {
+        const py = Math.max(0, Math.min(height - 1, k));
+        sum += temp[py * width + x];
+      }
+      out[x] = sum / (2 * r + 1);
+      for (let y = 1; y < height; y++) {
         const drop = Math.max(0, y - r - 1);
         const add = Math.min(height - 1, y + r);
         sum += temp[add * width + x] - temp[drop * width + x];
+        out[y * width + x] = sum / (2 * r + 1);
       }
-      const val = sum / (2 * r + 1);
-      out[y * width + x] = val >= 0.5 ? 1 : 0;
+    }
+    current.set(out);
+  }
+
+  // Safety enclosure invariant:
+  // 1. All artwork pixels are guaranteed to have distance = 0 (fully inside backing)
+  // 2. All pixels within minMargin of artwork are guaranteed to be within the white die-cut border,
+  //    preventing sharp tips from having 0 margin or extending through the white outline.
+  const minMargin = Math.max(2, Math.min(borderThickness * 0.5, borderThickness - 2));
+  const maxAllowedDistNearArtwork = Math.max(0, borderThickness - minMargin);
+
+  const result = new Float32Array(size);
+  for (let i = 0; i < size; i++) {
+    if (binarySeed[i] === 1) {
+      result[i] = 0;
+    } else {
+      const safeBound = rawDist[i] + maxAllowedDistNearArtwork;
+      result[i] = Math.min(current[i], safeBound);
     }
   }
 
-  return out;
+  return result;
 }
 
 /**
@@ -77,7 +107,8 @@ export function buildGroupDistanceField(
   labelMap: Uint16Array,
   sheetWidth: number,
   sheetHeight: number,
-  padding: number = 60
+  padding: number = 60,
+  borderThickness?: number
 ): {
   distField: Float32Array;
   patchBounds: BoundingBox;
@@ -180,18 +211,20 @@ export function buildGroupDistanceField(
     }
   }
 
-  // 4. Contour smoothing
+  // 4. Compute local Euclidean Distance Transform
+  let distField = computeEuclideanDistanceTransform(binarySeed, localWidth, localHeight);
+
+  // 5. Contour smoothing directly on distance field
   if (group.backingOverride?.smoothingRadius && group.backingOverride.smoothingRadius > 0) {
-    binarySeed = applyContourSmoothing(
+    distField = applyContourSmoothing(
+      distField,
       binarySeed,
       localWidth,
       localHeight,
-      group.backingOverride.smoothingRadius
+      group.backingOverride.smoothingRadius,
+      borderThickness ?? 20
     );
   }
-
-  // 5. Compute local Euclidean Distance Transform
-  const distField = computeEuclideanDistanceTransform(binarySeed, localWidth, localHeight);
 
   return {
     distField,
@@ -224,6 +257,8 @@ export function compositeSticker(
   croppedWidth: number;
   croppedHeight: number;
   croppedRgba: Uint8ClampedArray;
+  croppedX?: number;
+  croppedY?: number;
 } {
   const localWidth = patchBounds.width;
   const localHeight = patchBounds.height;
@@ -271,6 +306,12 @@ export function compositeSticker(
           // Smooth 1-pixel antialiasing transition at edge
           const frac = (radius + 0.5) - dist;
           backingAlpha = Math.round(Math.max(0, Math.min(255, frac * 255)));
+        }
+
+        // Safety enclosure invariant: artwork pixels always have full white backing under them
+        // so that smoothed die-cut borders never erode underneath convex tips
+        if (artworkAlpha > 0 && backingAlpha < 255) {
+          backingAlpha = 255;
         }
       }
 
@@ -357,6 +398,8 @@ export function compositeSticker(
     height: localHeight,
     croppedWidth,
     croppedHeight,
-    croppedRgba
+    croppedRgba,
+    croppedX: paddedMinX,
+    croppedY: paddedMinY
   };
 }

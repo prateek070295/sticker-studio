@@ -1,0 +1,1235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sticker Studio V1.2 — Photo Mode Assisted Finishing</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 16px;
+      background: #18181b;
+      color: #f4f4f5;
+      user-select: none;
+    }
+    h1 {
+      margin: 0 0 12px 0;
+      font-size: 20px;
+      color: #38bdf8;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .badge {
+      font-size: 11px;
+      background: #0284c7;
+      color: white;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-weight: normal;
+    }
+    .container {
+      display: flex;
+      gap: 16px;
+    }
+    .left-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .right-panel {
+      width: 440px;
+      background: #27272a;
+      border-radius: 8px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 92vh;
+      overflow-y: auto;
+    }
+    .toolbar-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      background: #202023;
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid #333338;
+    }
+    .group-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: #a1a1aa;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-right: 4px;
+    }
+    button {
+      background: #3b82f6;
+      color: white;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 5px;
+      font-weight: 500;
+      cursor: pointer;
+      font-size: 12px;
+      transition: background 0.15s;
+    }
+    button:hover:not(:disabled) {
+      background: #2563eb;
+    }
+    button.secondary {
+      background: #3f3f46;
+      color: #e4e4e7;
+    }
+    button.secondary:hover:not(:disabled) {
+      background: #52525b;
+    }
+    button.tool-active {
+      background: #0284c7;
+      box-shadow: 0 0 0 2px #38bdf8;
+    }
+    button.subject-active {
+      background: #10b981;
+      box-shadow: 0 0 0 2px #34d399;
+    }
+    button.danger {
+      background: #dc2626;
+    }
+    button.danger:hover:not(:disabled) {
+      background: #b91c1c;
+    }
+    button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .canvas-viewport {
+      position: relative;
+      border: 1px solid #3f3f46;
+      border-radius: 8px;
+      overflow: hidden;
+      width: 100%;
+      height: 680px;
+      background: repeating-conic-gradient(#27272a 0% 25%, #18181b 0% 50%) 50% / 20px 20px;
+    }
+    #canvas-transform-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      transform-origin: 0 0;
+    }
+    canvas {
+      display: block;
+    }
+    .metrics-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .metrics-table td {
+      padding: 4px 6px;
+      border-bottom: 1px solid #3f3f46;
+    }
+    .metrics-table td:first-child {
+      color: #a1a1aa;
+      font-weight: 500;
+    }
+    .metrics-table td:last-child {
+      text-align: right;
+      font-family: monospace;
+      color: #38bdf8;
+    }
+    .metrics-table tr.alert td:last-child {
+      color: #f87171;
+      font-weight: bold;
+    }
+    .metrics-table tr.pass td:last-child {
+      color: #4ade80;
+    }
+    .preview-box {
+      border: 1px solid #3f3f46;
+      border-radius: 6px;
+      padding: 8px;
+      background: #18181b;
+    }
+    .preview-title {
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: #e4e4e7;
+    }
+    .preview-img-row {
+      display: flex;
+      gap: 8px;
+    }
+    .preview-img-wrap {
+      flex: 1;
+      text-align: center;
+      background: repeating-conic-gradient(#27272a 0% 25%, #18181b 0% 50%) 50% / 14px 14px;
+      border-radius: 4px;
+      padding: 4px;
+    }
+    .preview-img-wrap img {
+      max-width: 100%;
+      max-height: 100px;
+      object-fit: contain;
+    }
+    .log-box {
+      background: #09090b;
+      border: 1px solid #27272a;
+      border-radius: 6px;
+      padding: 8px;
+      font-family: monospace;
+      font-size: 11px;
+      color: #a1a1aa;
+      height: 110px;
+      overflow-y: auto;
+    }
+    .status-banner {
+      padding: 6px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 500;
+      background: #1e293b;
+      border-left: 3px solid #38bdf8;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .slider-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: #d4d4d8;
+    }
+    input[type=range] {
+      accent-color: #38bdf8;
+    }
+  </style>
+</head>
+<body>
+  <h1>
+    Sticker Studio V1.2 — Photo Mode Assisted Finishing
+    <span class="badge">Phase 2A Prototype</span>
+  </h1>
+
+  <div class="container">
+    <div class="left-panel">
+      <!-- Row 1: Pipeline Init & Target Selection -->
+      <div class="toolbar-group">
+        <span class="group-label">Pipeline:</span>
+        <button id="btn-init">Load Model</button>
+        <button id="btn-encode" disabled>Encode Image</button>
+
+        <span class="group-label" style="margin-left: 12px;">Active Cutout:</span>
+        <button id="btn-person-a" class="secondary subject-active" disabled>Person A (Father)</button>
+        <button id="btn-person-b" class="secondary" disabled>Person B (Daughter)</button>
+        <button id="btn-person-ab" class="secondary" disabled>Combined A+B</button>
+      </div>
+
+      <!-- Row 2: AI Proposal Controls -->
+      <div class="toolbar-group">
+        <span class="group-label">AI Proposal:</span>
+        <button id="btn-tool-inc" class="secondary tool-active" disabled title="Left-click adds Positive prompt point">[+] Include</button>
+        <button id="btn-tool-exc" class="secondary" disabled title="Left-click adds Negative prompt point">[-] Exclude</button>
+        <button id="btn-clear-points" class="secondary" disabled>Clear Points</button>
+        <button id="btn-decode" disabled>Run Decode</button>
+        <button id="btn-cand-0" class="secondary" disabled>Cand 0</button>
+        <button id="btn-cand-1" class="secondary" disabled>Cand 1</button>
+        <button id="btn-cand-2" class="secondary" disabled>Cand 2</button>
+        <button id="btn-apply-proposal" style="background: #10b981;" disabled>Apply Proposal</button>
+        <button id="btn-cancel-proposal" class="secondary danger" disabled>Cancel</button>
+      </div>
+
+      <!-- Row 3: Manual Finishing Tools -->
+      <div class="toolbar-group">
+        <span class="group-label">Manual Brush:</span>
+        <button id="btn-tool-restore" class="secondary" disabled title="Paint to restore original photo pixels">Restore Brush</button>
+        <button id="btn-tool-erase" class="secondary" disabled title="Paint to erase pixels from cutout">Erase Brush</button>
+        <button id="btn-tool-pan" class="secondary" disabled title="Pan the canvas">Pan</button>
+
+        <div class="slider-wrap" style="margin-left: 8px;">
+          <span>Size:</span>
+          <input type="range" id="brush-size" min="4" max="80" value="20" style="width: 70px;">
+          <span id="brush-size-val">20px</span>
+        </div>
+
+        <div class="slider-wrap" style="margin-left: 8px;">
+          <span>Hardness:</span>
+          <button id="btn-brush-hard" class="secondary" style="padding: 2px 6px; font-size: 11px;">100% Crisp</button>
+        </div>
+
+        <span class="group-label" style="margin-left: 12px;">History:</span>
+        <button id="btn-undo" class="secondary" disabled title="Undo last brush stroke (Ctrl+Z)">Undo</button>
+        <button id="btn-redo" class="secondary" disabled title="Redo last brush stroke (Ctrl+Y)">Redo</button>
+      </div>
+
+      <!-- Row 4: View & Zoom -->
+      <div class="toolbar-group">
+        <span class="group-label">View:</span>
+        <button id="btn-view-overlay" class="tool-active" style="padding: 4px 8px;">Overlay</button>
+        <button id="btn-view-artwork" class="secondary" style="padding: 4px 8px;">Artwork Only</button>
+        <button id="btn-view-white-backed" class="secondary" style="padding: 4px 8px;">White-Backed</button>
+        <button id="btn-view-source" class="secondary" style="padding: 4px 8px;">Source Photo</button>
+
+        <span class="group-label" style="margin-left: 12px;">Zoom:</span>
+        <button id="btn-zoom-in" class="secondary" style="padding: 4px 8px;">+</button>
+        <button id="btn-zoom-out" class="secondary" style="padding: 4px 8px;">-</button>
+        <button id="btn-zoom-reset" class="secondary" style="padding: 4px 8px;">100%</button>
+        <span id="zoom-val" style="font-size: 11px; color: #a1a1aa; margin-left: 4px;">100%</span>
+
+        <button id="btn-export" style="margin-left: auto; background: #8b5cf6;" disabled>Export All PNGs</button>
+      </div>
+
+      <div class="status-banner" id="status-banner">
+        <span id="status-text">Ready. Click 'Load Model' to begin.</span>
+        <span id="revision-text" style="font-family: monospace; color: #94a3b8;">Rev: 0</span>
+      </div>
+
+      <!-- Interactive Canvas Viewport -->
+      <div class="canvas-viewport" id="viewport">
+        <div id="canvas-transform-layer">
+          <canvas id="view-canvas" width="1200" height="896"></canvas>
+        </div>
+      </div>
+      <div style="font-size: 11px; color: #a1a1aa;">
+        Controls: Left-click paints or places points. Spacebar + drag pans. Mousewheel zooms. Right-click or Shift-click inverts point mode.
+      </div>
+    </div>
+
+    <!-- Right Panel: Live Metrics, Previews, Audit Log -->
+    <div class="right-panel">
+      <h3 style="margin: 0; font-size: 14px;">Live Verification & Region Checks</h3>
+      <table class="metrics-table">
+        <tr><td>Active Subject</td><td id="m-subject">Person A (Father)</td></tr>
+        <tr><td>Person A Pixels</td><td id="m-px-a">0</td></tr>
+        <tr><td>Person B Pixels</td><td id="m-px-b">0</td></tr>
+        <tr><td>Combined A+B Pixels</td><td id="m-px-ab">0</td></tr>
+        <tr><td>Shared Overlap</td><td id="m-overlap">0 px (0%)</td></tr>
+        <tr id="row-father-face"><td>Must-Keep Father Face</td><td id="m-father-face">—</td></tr>
+        <tr id="row-father-sweater"><td>Must-Keep Father Sweater</td><td id="m-father-sweater">—</td></tr>
+        <tr id="row-daughter-face-a"><td>Must-Exclude Daughter in A</td><td id="m-daughter-face-a">—</td></tr>
+        <tr id="row-daughter-face"><td>Must-Keep Daughter Face</td><td id="m-daughter-face">—</td></tr>
+        <tr id="row-daughter-jacket"><td>Must-Keep Daughter Jacket</td><td id="m-daughter-jacket">—</td></tr>
+        <tr id="row-father-face-b"><td>Must-Exclude Father in B</td><td id="m-father-face-b">—</td></tr>
+        <tr><td>Yellow Sleeve in A</td><td id="m-sleeve-a">—</td></tr>
+        <tr><td>Navy Arm in B</td><td id="m-arm-b">—</td></tr>
+        <tr><td>Prompt Points Placed</td><td id="m-effort-points">0</td></tr>
+        <tr><td>Brush Strokes Applied</td><td id="m-effort-strokes">0</td></tr>
+        <tr><td>Undo Actions</td><td id="m-effort-undos">0</td></tr>
+      </table>
+
+      <div class="preview-box">
+        <div class="preview-title">Cutout Previews (Accepted Artwork + Backing)</div>
+        <div class="preview-img-row">
+          <div class="preview-img-wrap" id="wrap-a">
+            <div style="font-size: 10px; margin-bottom: 2px;">Person A</div>
+            <img id="img-prev-a" alt="A">
+          </div>
+          <div class="preview-img-wrap" id="wrap-b">
+            <div style="font-size: 10px; margin-bottom: 2px;">Person B</div>
+            <img id="img-prev-b" alt="B">
+          </div>
+          <div class="preview-img-wrap" id="wrap-ab">
+            <div style="font-size: 10px; margin-bottom: 2px;">Combined A+B</div>
+            <img id="img-prev-ab" alt="A+B">
+          </div>
+        </div>
+      </div>
+
+      <div class="log-box" id="log-box">Ready.</div>
+    </div>
+  </div>
+
+  <script type="module">
+    import {
+      composePhotoCutout,
+      applyBrushStroke,
+      revertMaskPatch,
+      applyMaskPatch
+    } from '/scripts/photo_prototype/adapter.js';
+
+    const canvas = document.getElementById('view-canvas');
+    const ctx = canvas.getContext('2d');
+    const viewport = document.getElementById('viewport');
+    const transformLayer = document.getElementById('canvas-transform-layer');
+    const logBox = document.getElementById('log-box');
+
+    function log(msg) {
+      logBox.innerText += '\n' + msg;
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    const W = canvas.width;
+    const H = canvas.height;
+
+    // Load source photo
+    const sourceImage = new Image();
+    sourceImage.src = '/fixtures/prototype_touching_subjects.jpg';
+    await new Promise((res) => { sourceImage.onload = res; });
+    ctx.drawImage(sourceImage, 0, 0);
+    const sourceImageData = ctx.getImageData(0, 0, W, H);
+    const sourceRgba = sourceImageData.data;
+    log('Source photograph loaded: 1200x896');
+
+    // Verification Regions (Source Space)
+    const REGIONS = {
+      fatherFace: { x0: 340, y0: 290, x1: 410, y1: 350 }, // Father head core (4331 px)
+      fatherSweater: { x0: 330, y0: 440, x1: 390, y1: 500 }, // Father chest core (3721 px)
+      daughterFace: { x0: 560, y0: 410, x1: 610, y1: 460 }, // Daughter face core (2601 px)
+      daughterJacket: { x0: 560, y0: 560, x1: 610, y1: 620 }, // Daughter torso core (3111 px)
+      disputedSleeveInA: { x0: 510, y0: 490, x1: 540, y1: 540 }, // Sleeve interface (1581 px)
+      disputedArmInB: { x0: 440, y0: 470, x1: 480, y1: 520 }, // Arm interface (2091 px)
+    };
+
+    function countInRegion(mask, r) {
+      if (!mask) return { inside: 0, total: (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1), pct: 0 };
+      let inside = 0;
+      const total = (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1);
+      for (let y = r.y0; y <= r.y1; y++) {
+        const row = y * W;
+        for (let x = r.x0; x <= r.x1; x++) {
+          if (mask[row + x] > 0) inside++;
+        }
+      }
+      return { inside, total, pct: (inside / total) * 100 };
+    }
+
+    // Per-Subject State
+    function createSubjectState(name) {
+      return {
+        name,
+        acceptedMask: null, // Uint8Array(W * H), values 0 or 255
+        points: [],
+        labels: [],
+        history: [], // stack of MaskPatch
+        redoStack: [], // stack of MaskPatch
+        revisionId: 0,
+      };
+    }
+
+    const state = {
+      activeSubject: 'A', // 'A', 'B', 'AB'
+      activeTool: 'prompt_include', // 'prompt_include', 'prompt_exclude', 'brush_restore', 'brush_erase', 'pan'
+      viewMode: 'overlay', // 'overlay', 'artwork', 'white_backed', 'source'
+      subjects: {
+        A: createSubjectState('Person A'),
+        B: createSubjectState('Person B'),
+        AB: createSubjectState('Combined A+B'),
+      },
+      pendingProposal: null, // { subject: 'A'|'B', candidates: [...], selectedIdx: 0, revisionId: number }
+      brush: {
+        radius: 20,
+        hardness: 1.0, // 1.0 = crisp, 0.5 = soft
+      },
+      view: {
+        zoom: 1.0,
+        panX: 0,
+        panY: 0,
+        isPanning: false,
+        lastPanX: 0,
+        lastPanY: 0,
+      },
+      interactionStats: {
+        promptClicks: 0,
+        brushStrokes: 0,
+        undos: 0,
+      },
+      cursorPos: null, // canvas space { x, y }
+      strokePoints: [],
+      isDrawing: false,
+      modelLoaded: false,
+      isEncoding: false,
+      isDecoding: false,
+      exportResults: {},
+    };
+
+    // Worker Init
+    const worker = new Worker('/scripts/photo_prototype/dist/worker.bundle.js', { type: 'module' });
+
+    worker.onmessage = (e) => {
+      const { type, id, ...payload } = e.data;
+      if (type === 'INIT_DONE') {
+        state.modelLoaded = true;
+        document.getElementById('btn-init').classList.add('tool-active');
+        document.getElementById('btn-encode').disabled = false;
+        log(`Model loaded in ${payload.durationMs.toFixed(1)} ms via ${payload.executionProvider}`);
+        updateStatus('Model loaded. Ready to encode image.');
+      } else if (type === 'ENCODE_DONE') {
+        state.isEncoding = false;
+        document.getElementById('btn-encode').classList.add('tool-active');
+        ['btn-person-a', 'btn-person-b', 'btn-person-ab', 'btn-tool-inc', 'btn-tool-exc', 'btn-clear-points', 'btn-decode', 'btn-tool-restore', 'btn-tool-erase', 'btn-tool-pan'].forEach(id => {
+          document.getElementById(id).disabled = false;
+        });
+        log(`Image encoded in ${payload.durationMs.toFixed(1)} ms.`);
+        updateStatus('Image encoded. Ready to prompt or paint.');
+      } else if (type === 'DECODE_DONE') {
+        state.isDecoding = false;
+        const currentSubjState = state.subjects[state.activeSubject];
+        // Revision check: reject stale AI proposals
+        if (id !== currentSubjState.revisionId) {
+          log(`Discarded stale AI proposal (id ${id} != active revision ${currentSubjState.revisionId})`);
+          return;
+        }
+
+        const { candidates, decodeDurationMs, postProcessDurationMs } = payload;
+        state.pendingProposal = {
+          subject: state.activeSubject,
+          candidates,
+          selectedIdx: 0,
+          revisionId: id,
+        };
+
+        // Enable proposal controls
+        [0, 1, 2].forEach(i => {
+          const btn = document.getElementById(`btn-cand-${i}`);
+          btn.disabled = false;
+          btn.innerText = `Cand ${i} (${candidates[i].pixelCount}px)`;
+          if (i === 0) btn.classList.add('tool-active');
+          else btn.classList.remove('tool-active');
+        });
+        document.getElementById('btn-apply-proposal').disabled = false;
+        document.getElementById('btn-cancel-proposal').disabled = false;
+
+        log(`AI proposal ready: ${candidates.length} candidates. Total turnaround: ${(decodeDurationMs + postProcessDurationMs).toFixed(1)} ms.`);
+        updateStatus(`AI proposal ready for ${currentSubjState.name}. Click 'Apply Proposal' or choose candidate.`);
+        renderCanvas();
+      } else if (type === 'ERROR') {
+        log(`Worker error: ${payload.error}`);
+        updateStatus(`Worker error: ${payload.error}`);
+      }
+    };
+
+    // DOM Helpers
+    function updateStatus(text) {
+      document.getElementById('status-text').innerText = text;
+      const subj = state.subjects[state.activeSubject];
+      document.getElementById('revision-text').innerText = `Rev: ${subj ? subj.revisionId : 0} | Hist: ${subj ? subj.history.length : 0}`;
+    }
+
+    function updateTransform() {
+      transformLayer.style.transform = `translate(${state.view.panX}px, ${state.view.panY}px) scale(${state.view.zoom})`;
+      document.getElementById('zoom-val').innerText = `${Math.round(state.view.zoom * 100)}%`;
+    }
+
+    function screenToCanvas(clientX, clientY) {
+      const rect = canvas.getBoundingClientRect();
+      const x = Math.round((clientX - rect.left) * (W / rect.width));
+      const y = Math.round((clientY - rect.top) * (H / rect.height));
+      return {
+        x: Math.max(0, Math.min(W - 1, x)),
+        y: Math.max(0, Math.min(H - 1, y))
+      };
+    }
+
+    // Metrics Calculation
+    function updateLiveMetrics() {
+      const maskA = state.subjects.A.acceptedMask;
+      const maskB = state.subjects.B.acceptedMask;
+      const maskAB = state.subjects.AB.acceptedMask;
+
+      let pxA = 0, pxB = 0, pxAB = 0, overlap = 0;
+      for (let i = 0; i < W * H; i++) {
+        const a = maskA && maskA[i] > 0;
+        const b = maskB && maskB[i] > 0;
+        if (a) pxA++;
+        if (b) pxB++;
+        if (a && b) overlap++;
+        if (maskAB && maskAB[i] > 0) pxAB++;
+      }
+
+      document.getElementById('m-subject').innerText = state.subjects[state.activeSubject].name;
+      document.getElementById('m-px-a').innerText = `${pxA.toLocaleString()} px`;
+      document.getElementById('m-px-b').innerText = `${pxB.toLocaleString()} px`;
+      document.getElementById('m-px-ab').innerText = `${pxAB.toLocaleString()} px`;
+
+      const overlapPct = pxB > 0 ? ((overlap / pxB) * 100).toFixed(1) : '0';
+      document.getElementById('m-overlap').innerText = `${overlap.toLocaleString()} px (${overlapPct}% of B)`;
+
+      // Region checks
+      const rFatFace = countInRegion(maskA, REGIONS.fatherFace);
+      const rFatSwtr = countInRegion(maskA, REGIONS.fatherSweater);
+      const rDauFaceInA = countInRegion(maskA, REGIONS.daughterFace);
+      const rDauFace = countInRegion(maskB, REGIONS.daughterFace);
+      const rDauJacket = countInRegion(maskB, REGIONS.daughterJacket);
+      const rFatFaceInB = countInRegion(maskB, REGIONS.fatherFace);
+      const rSleeveA = countInRegion(maskA, REGIONS.disputedSleeveInA);
+      const rArmB = countInRegion(maskB, REGIONS.disputedArmInB);
+
+      document.getElementById('m-father-face').innerText = `${rFatFace.inside}/${rFatFace.total} (${rFatFace.pct.toFixed(1)}%)`;
+      document.getElementById('row-father-face').className = rFatFace.pct >= 98 ? 'pass' : 'alert';
+
+      document.getElementById('m-father-sweater').innerText = `${rFatSwtr.inside}/${rFatSwtr.total} (${rFatSwtr.pct.toFixed(1)}%)`;
+      document.getElementById('row-father-sweater').className = rFatSwtr.pct >= 98 ? 'pass' : 'alert';
+
+      document.getElementById('m-daughter-face-a').innerText = `${rDauFaceInA.inside}/${rDauFaceInA.total} (${rDauFaceInA.pct.toFixed(1)}%)`;
+      document.getElementById('row-daughter-face-a').className = rDauFaceInA.pct <= 1 ? 'pass' : 'alert';
+
+      document.getElementById('m-daughter-face').innerText = `${rDauFace.inside}/${rDauFace.total} (${rDauFace.pct.toFixed(1)}%)`;
+      document.getElementById('row-daughter-face').className = rDauFace.pct >= 98 ? 'pass' : 'alert';
+
+      document.getElementById('m-daughter-jacket').innerText = `${rDauJacket.inside}/${rDauJacket.total} (${rDauJacket.pct.toFixed(1)}%)`;
+      document.getElementById('row-daughter-jacket').className = rDauJacket.pct >= 95 ? 'pass' : 'alert';
+
+      document.getElementById('m-father-face-b').innerText = `${rFatFaceInB.inside}/${rFatFaceInB.total} (${rFatFaceInB.pct.toFixed(1)}%)`;
+      document.getElementById('row-father-face-b').className = rFatFaceInB.pct === 0 ? 'pass' : 'alert';
+
+      document.getElementById('m-sleeve-a').innerText = `${rSleeveA.inside}/${rSleeveA.total} (${rSleeveA.pct.toFixed(1)}%)`;
+      document.getElementById('m-arm-b').innerText = `${rArmB.inside}/${rArmB.total} (${rArmB.pct.toFixed(1)}%)`;
+
+      // Effort counters
+      document.getElementById('m-effort-points').innerText = state.interactionStats.promptClicks;
+      document.getElementById('m-effort-strokes').innerText = state.interactionStats.brushStrokes;
+      document.getElementById('m-effort-undos').innerText = state.interactionStats.undos;
+
+      // History button states
+      const currSubj = state.subjects[state.activeSubject];
+      document.getElementById('btn-undo').disabled = !currSubj || currSubj.history.length === 0;
+      document.getElementById('btn-redo').disabled = !currSubj || currSubj.redoStack.length === 0;
+
+      // Enable export button if cutouts exist
+      document.getElementById('btn-export').disabled = !(maskA || maskB || maskAB);
+    }
+
+    // Canvas Rendering
+    function renderCanvas() {
+      ctx.clearRect(0, 0, W, H);
+
+      const currSubj = state.subjects[state.activeSubject];
+      const mask = currSubj ? currSubj.acceptedMask : null;
+
+      if (state.viewMode === 'source') {
+        // Raw source photo only
+        ctx.drawImage(sourceImage, 0, 0);
+      } else if (state.viewMode === 'artwork') {
+        // Cutout artwork pixels only
+        if (!mask) {
+          ctx.drawImage(sourceImage, 0, 0);
+        } else {
+          const artImg = ctx.createImageData(W, H);
+          const data = artImg.data;
+          for (let i = 0; i < W * H; i++) {
+            const off = i * 4;
+            if (mask[i] > 0) {
+              data[off] = sourceRgba[off];
+              data[off + 1] = sourceRgba[off + 1];
+              data[off + 2] = sourceRgba[off + 2];
+              data[off + 3] = 255;
+            }
+          }
+          ctx.putImageData(artImg, 0, 0);
+        }
+      } else if (state.viewMode === 'white_backed') {
+        // White-backed sticker
+        if (!mask) {
+          ctx.drawImage(sourceImage, 0, 0);
+        } else {
+          const res = composePhotoCutout(mask, sourceRgba, W, H, 20);
+          // Draw white-backed centered
+          ctx.fillStyle = '#09090b';
+          ctx.fillRect(0, 0, W, H);
+          const tempCanvas = document.createElement('canvas');
+          tempCanvas.width = res.whiteBackedWidth;
+          tempCanvas.height = res.whiteBackedHeight;
+          const tempCtx = tempCanvas.getContext('2d');
+          const tImg = tempCtx.createImageData(res.whiteBackedWidth, res.whiteBackedHeight);
+          tImg.data.set(res.whiteBackedRgba);
+          tempCtx.putImageData(tImg, 0, 0);
+          const ox = Math.round((W - res.whiteBackedWidth) / 2);
+          const oy = Math.round((H - res.whiteBackedHeight) / 2);
+          ctx.drawImage(tempCanvas, ox, oy);
+        }
+      } else {
+        // Overlay Mode (Source photo + mask tint + proposal overlay)
+        ctx.drawImage(sourceImage, 0, 0);
+
+        if (mask || state.pendingProposal) {
+          const imgData = ctx.getImageData(0, 0, W, H);
+          const data = imgData.data;
+
+          const subjColor = state.activeSubject === 'A'
+            ? [56, 189, 248] // Blue for Father
+            : state.activeSubject === 'B'
+            ? [250, 204, 21] // Yellow for Daughter
+            : [168, 85, 247]; // Purple for Combined
+
+          // 1. Draw accepted mask
+          if (mask) {
+            for (let i = 0; i < W * H; i++) {
+              if (mask[i] > 0) {
+                const off = i * 4;
+                data[off] = Math.round((data[off] + subjColor[0]) / 2);
+                data[off + 1] = Math.round((data[off + 1] + subjColor[1]) / 2);
+                data[off + 2] = Math.round((data[off + 2] + subjColor[2]) / 2);
+              }
+            }
+          }
+
+          // 2. Draw pending AI proposal if present
+          if (state.pendingProposal && state.pendingProposal.subject === state.activeSubject) {
+            const cand = state.pendingProposal.candidates[state.pendingProposal.selectedIdx];
+            if (cand && cand.mask) {
+              const pMask = cand.mask;
+              for (let i = 0; i < W * H; i++) {
+                if (pMask[i] === 1) {
+                  const off = i * 4;
+                  // Bright Emerald Green overlay for pending proposal
+                  data[off] = Math.round(data[off] * 0.4 + 16 * 0.6);
+                  data[off + 1] = Math.round(data[off + 1] * 0.4 + 185 * 0.6);
+                  data[off + 2] = Math.round(data[off + 2] * 0.4 + 129 * 0.6);
+                }
+              }
+            }
+          }
+
+          ctx.putImageData(imgData, 0, 0);
+        }
+
+        // Draw Prompt Points
+        if (currSubj && currSubj.points.length > 0) {
+          for (let i = 0; i < currSubj.points.length; i++) {
+            const [px, py] = currSubj.points[i];
+            const isPos = currSubj.labels[i] === 1;
+
+            ctx.beginPath();
+            ctx.arc(px, py, 6, 0, Math.PI * 2);
+            ctx.fillStyle = isPos ? '#22c55e' : '#ef4444';
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#ffffff';
+            ctx.stroke();
+          }
+        }
+
+        // Draw Brush Cursor Circle
+        if (state.cursorPos && (state.activeTool === 'brush_restore' || state.activeTool === 'brush_erase')) {
+          ctx.beginPath();
+          ctx.arc(state.cursorPos.x, state.cursorPos.y, state.brush.radius, 0, Math.PI * 2);
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = state.activeTool === 'brush_restore' ? '#4ade80' : '#f87171';
+          ctx.stroke();
+        }
+      }
+
+      updateLiveMetrics();
+    }
+
+    // Pointer & Mouse Interaction
+    viewport.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const zoomFactor = e.deltaY < 0 ? 1.15 : 0.87;
+      const newZoom = Math.max(0.5, Math.min(4.0, state.view.zoom * zoomFactor));
+
+      const rect = viewport.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      state.view.panX = mouseX - (mouseX - state.view.panX) * (newZoom / state.view.zoom);
+      state.view.panY = mouseY - (mouseY - state.view.panY) * (newZoom / state.view.zoom);
+      state.view.zoom = newZoom;
+      updateTransform();
+      renderCanvas();
+    });
+
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    canvas.addEventListener('mousedown', (e) => {
+      // Space or middle-click or pan tool initiates pan
+      if (e.button === 1 || e.spaceKey || state.activeTool === 'pan') {
+        state.view.isPanning = true;
+        state.view.lastPanX = e.clientX;
+        state.view.lastPanY = e.clientY;
+        return;
+      }
+
+      const pos = screenToCanvas(e.clientX, e.clientY);
+      state.cursorPos = pos;
+
+      const currSubj = state.subjects[state.activeSubject];
+      if (!currSubj) return;
+
+      if (state.activeTool === 'prompt_include' || state.activeTool === 'prompt_exclude') {
+        const isRightClick = e.button === 2 || e.shiftKey;
+        const defaultLabel = state.activeTool === 'prompt_include' ? 1 : 0;
+        const finalLabel = isRightClick ? (1 - defaultLabel) : defaultLabel;
+
+        currSubj.points.push([pos.x, pos.y]);
+        currSubj.labels.push(finalLabel);
+        state.interactionStats.promptClicks++;
+        log(`Added ${finalLabel === 1 ? 'Positive' : 'Negative'} point at (${pos.x}, ${pos.y}) for ${currSubj.name}`);
+        renderCanvas();
+      } else if (state.activeTool === 'brush_restore' || state.activeTool === 'brush_erase') {
+        // Initialize mask if empty
+        if (!currSubj.acceptedMask) {
+          currSubj.acceptedMask = new Uint8Array(W * H);
+        }
+
+        state.isDrawing = true;
+        state.strokePoints = [pos];
+        renderCanvas();
+      }
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (state.view.isPanning) {
+        state.view.panX += e.clientX - state.view.lastPanX;
+        state.view.panY += e.clientY - state.view.lastPanY;
+        state.view.lastPanX = e.clientX;
+        state.view.lastPanY = e.clientY;
+        updateTransform();
+        return;
+      }
+
+      const rect = canvas.getBoundingClientRect();
+      if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
+        state.cursorPos = screenToCanvas(e.clientX, e.clientY);
+      } else {
+        state.cursorPos = null;
+      }
+
+      if (state.isDrawing) {
+        const pos = screenToCanvas(e.clientX, e.clientY);
+        state.strokePoints.push(pos);
+      }
+
+      renderCanvas();
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (state.view.isPanning) {
+        state.view.isPanning = false;
+        return;
+      }
+
+      if (state.isDrawing) {
+        state.isDrawing = false;
+        const currSubj = state.subjects[state.activeSubject];
+        if (currSubj && state.strokePoints.length > 0) {
+          const patch = applyBrushStroke(currSubj.acceptedMask, W, H, state.strokePoints, {
+            radius: state.brush.radius,
+            hardness: state.brush.hardness,
+            opacity: 1.0,
+            mode: state.activeTool === 'brush_restore' ? 'restore' : 'erase'
+          });
+
+          if (patch) {
+            currSubj.history.push(patch);
+            currSubj.redoStack = [];
+            currSubj.revisionId++;
+            state.interactionStats.brushStrokes++;
+            log(`Applied ${state.activeTool === 'brush_restore' ? 'Restore' : 'Erase'} stroke (${patch.bounds.width}x${patch.bounds.height} bbox) to ${currSubj.name}`);
+            updateStatus(`Applied stroke to ${currSubj.name}`);
+          }
+        }
+        state.strokePoints = [];
+        renderCanvas();
+      }
+    });
+
+    // Keyboard Shortcuts
+    window.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        if (e.shiftKey) {
+          document.getElementById('btn-redo').click();
+        } else {
+          document.getElementById('btn-undo').click();
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        document.getElementById('btn-redo').click();
+      }
+    });
+
+    // Toolbar Buttons & Actions
+    document.getElementById('btn-init').onclick = () => {
+      log('Initializing SlimSAM model in worker...');
+      updateStatus('Initializing SlimSAM model...');
+      worker.postMessage({ type: 'INIT', id: 1 });
+    };
+
+    document.getElementById('btn-encode').onclick = () => {
+      log('Encoding source photo in worker...');
+      updateStatus('Encoding image...');
+      state.isEncoding = true;
+      worker.postMessage({
+        type: 'ENCODE',
+        id: 2,
+        data: { imageUrl: window.location.origin + '/fixtures/prototype_touching_subjects.jpg', sourceKey: 'prototype_touching' }
+      });
+    };
+
+    function setActiveSubject(key) {
+      state.activeSubject = key;
+      ['btn-person-a', 'btn-person-b', 'btn-person-ab'].forEach(id => {
+        document.getElementById(id).classList.remove('subject-active');
+      });
+      if (key === 'A') document.getElementById('btn-person-a').classList.add('subject-active');
+      if (key === 'B') document.getElementById('btn-person-b').classList.add('subject-active');
+      if (key === 'AB') {
+        document.getElementById('btn-person-ab').classList.add('subject-active');
+        // Auto-initialize combined mask if empty
+        const sAB = state.subjects.AB;
+        if (!sAB.acceptedMask) {
+          sAB.acceptedMask = new Uint8Array(W * H);
+          const mA = state.subjects.A.acceptedMask;
+          const mB = state.subjects.B.acceptedMask;
+          for (let i = 0; i < W * H; i++) {
+            if ((mA && mA[i] > 0) || (mB && mB[i] > 0)) {
+              sAB.acceptedMask[i] = 255;
+            }
+          }
+          log('Initialized Combined A+B mask from current A and B selections.');
+        }
+      }
+
+      state.pendingProposal = null;
+      [0, 1, 2].forEach(i => document.getElementById(`btn-cand-${i}`).disabled = true);
+      document.getElementById('btn-apply-proposal').disabled = true;
+      document.getElementById('btn-cancel-proposal').disabled = true;
+
+      log(`Switched active cutout target to: ${state.subjects[key].name}`);
+      updateStatus(`Selected: ${state.subjects[key].name}`);
+      renderCanvas();
+    }
+
+    document.getElementById('btn-person-a').onclick = () => setActiveSubject('A');
+    document.getElementById('btn-person-b').onclick = () => setActiveSubject('B');
+    document.getElementById('btn-person-ab').onclick = () => setActiveSubject('AB');
+
+    function setActiveTool(tool) {
+      state.activeTool = tool;
+      ['btn-tool-inc', 'btn-tool-exc', 'btn-tool-restore', 'btn-tool-erase', 'btn-tool-pan'].forEach(id => {
+        document.getElementById(id).classList.remove('tool-active');
+      });
+      if (tool === 'prompt_include') document.getElementById('btn-tool-inc').classList.add('tool-active');
+      if (tool === 'prompt_exclude') document.getElementById('btn-tool-exc').classList.add('tool-active');
+      if (tool === 'brush_restore') document.getElementById('btn-tool-restore').classList.add('tool-active');
+      if (tool === 'brush_erase') document.getElementById('btn-tool-erase').classList.add('tool-active');
+      if (tool === 'pan') document.getElementById('btn-tool-pan').classList.add('tool-active');
+      log(`Active tool: ${tool}`);
+    }
+
+    document.getElementById('btn-tool-inc').onclick = () => setActiveTool('prompt_include');
+    document.getElementById('btn-tool-exc').onclick = () => setActiveTool('prompt_exclude');
+    document.getElementById('btn-tool-restore').onclick = () => setActiveTool('brush_restore');
+    document.getElementById('btn-tool-erase').onclick = () => setActiveTool('brush_erase');
+    document.getElementById('btn-tool-pan').onclick = () => setActiveTool('pan');
+
+    // Brush Settings
+    document.getElementById('brush-size').oninput = (e) => {
+      state.brush.radius = parseInt(e.target.value, 10);
+      document.getElementById('brush-size-val').innerText = `${state.brush.radius}px`;
+      renderCanvas();
+    };
+
+    document.getElementById('btn-brush-hard').onclick = () => {
+      state.brush.hardness = state.brush.hardness === 1.0 ? 0.5 : 1.0;
+      document.getElementById('btn-brush-hard').innerText = state.brush.hardness === 1.0 ? '100% Crisp' : '50% Soft';
+      log(`Brush hardness set to ${Math.round(state.brush.hardness * 100)}%`);
+    };
+
+    // History (Undo / Redo)
+    document.getElementById('btn-undo').onclick = () => {
+      const currSubj = state.subjects[state.activeSubject];
+      if (!currSubj || currSubj.history.length === 0) return;
+      const patch = currSubj.history.pop();
+      revertMaskPatch(currSubj.acceptedMask, W, patch);
+      currSubj.redoStack.push(patch);
+      currSubj.revisionId++;
+      state.interactionStats.undos++;
+      log(`Undo stroke on ${currSubj.name}`);
+      updateStatus(`Undo performed on ${currSubj.name}`);
+      renderCanvas();
+    };
+
+    document.getElementById('btn-redo').onclick = () => {
+      const currSubj = state.subjects[state.activeSubject];
+      if (!currSubj || currSubj.redoStack.length === 0) return;
+      const patch = currSubj.redoStack.pop();
+      applyMaskPatch(currSubj.acceptedMask, W, patch);
+      currSubj.history.push(patch);
+      currSubj.revisionId++;
+      log(`Redo stroke on ${currSubj.name}`);
+      updateStatus(`Redo performed on ${currSubj.name}`);
+      renderCanvas();
+    };
+
+    // AI Proposal Workflow
+    document.getElementById('btn-clear-points').onclick = () => {
+      const currSubj = state.subjects[state.activeSubject];
+      if (currSubj) {
+        currSubj.points = [];
+        currSubj.labels = [];
+      }
+      state.pendingProposal = null;
+      renderCanvas();
+      log(`Cleared prompt points for ${currSubj ? currSubj.name : ''}`);
+    };
+
+    document.getElementById('btn-decode').onclick = () => {
+      const currSubj = state.subjects[state.activeSubject];
+      if (!currSubj || currSubj.points.length === 0) {
+        alert('Please add prompt points on the canvas first!');
+        return;
+      }
+      state.isDecoding = true;
+      currSubj.revisionId++;
+      log(`Sending decode request for ${currSubj.name} (Rev ${currSubj.revisionId}, ${currSubj.points.length} points)...`);
+      updateStatus(`Running AI decode for ${currSubj.name}...`);
+      worker.postMessage({
+        type: 'DECODE',
+        id: currSubj.revisionId,
+        data: { points: currSubj.points, labels: currSubj.labels }
+      });
+    };
+
+    function selectCandidate(idx) {
+      if (!state.pendingProposal || !state.pendingProposal.candidates[idx]) return;
+      state.pendingProposal.selectedIdx = idx;
+      [0, 1, 2].forEach(i => {
+        const btn = document.getElementById(`btn-cand-${i}`);
+        if (i === idx) btn.classList.add('tool-active');
+        else btn.classList.remove('tool-active');
+      });
+      renderCanvas();
+      log(`Selected Candidate ${idx} (${state.pendingProposal.candidates[idx].pixelCount} px)`);
+    }
+
+    document.getElementById('btn-cand-0').onclick = () => selectCandidate(0);
+    document.getElementById('btn-cand-1').onclick = () => selectCandidate(1);
+    document.getElementById('btn-cand-2').onclick = () => selectCandidate(2);
+
+    document.getElementById('btn-apply-proposal').onclick = () => {
+      if (!state.pendingProposal) return;
+      const currSubj = state.subjects[state.activeSubject];
+      const cand = state.pendingProposal.candidates[state.pendingProposal.selectedIdx];
+      if (!cand || !cand.mask) return;
+
+      // Convert 1 -> 255 for accepted mask
+      const newMask = new Uint8Array(W * H);
+      for (let i = 0; i < W * H; i++) {
+        if (cand.mask[i] === 1) newMask[i] = 255;
+      }
+
+      currSubj.acceptedMask = newMask;
+      currSubj.history = []; // reset brush history for fresh accepted proposal
+      currSubj.redoStack = [];
+      currSubj.revisionId++;
+      state.pendingProposal = null;
+
+      [0, 1, 2].forEach(i => document.getElementById(`btn-cand-${i}`).disabled = true);
+      document.getElementById('btn-apply-proposal').disabled = true;
+      document.getElementById('btn-cancel-proposal').disabled = true;
+
+      log(`Applied AI proposal to ${currSubj.name} (${cand.pixelCount} px, score ${cand.score.toFixed(4)}).`);
+      updateStatus(`Applied proposal to ${currSubj.name}.`);
+      renderCanvas();
+    };
+
+    document.getElementById('btn-cancel-proposal').onclick = () => {
+      state.pendingProposal = null;
+      [0, 1, 2].forEach(i => document.getElementById(`btn-cand-${i}`).disabled = true);
+      document.getElementById('btn-apply-proposal').disabled = true;
+      document.getElementById('btn-cancel-proposal').disabled = true;
+      log('Cancelled AI proposal.');
+      updateStatus('Cancelled AI proposal.');
+      renderCanvas();
+    };
+
+    // View Modes
+    function setViewMode(mode) {
+      state.viewMode = mode;
+      ['btn-view-overlay', 'btn-view-artwork', 'btn-view-white-backed', 'btn-view-source'].forEach(id => {
+        document.getElementById(id).classList.remove('tool-active');
+      });
+      if (mode === 'overlay') document.getElementById('btn-view-overlay').classList.add('tool-active');
+      if (mode === 'artwork') document.getElementById('btn-view-artwork').classList.add('tool-active');
+      if (mode === 'white_backed') document.getElementById('btn-view-white-backed').classList.add('tool-active');
+      if (mode === 'source') document.getElementById('btn-view-source').classList.add('tool-active');
+      log(`View mode: ${mode}`);
+      renderCanvas();
+    }
+
+    document.getElementById('btn-view-overlay').onclick = () => setViewMode('overlay');
+    document.getElementById('btn-view-artwork').onclick = () => setViewMode('artwork');
+    document.getElementById('btn-view-white-backed').onclick = () => setViewMode('white_backed');
+    document.getElementById('btn-view-source').onclick = () => setViewMode('source');
+
+    // Zoom Buttons
+    document.getElementById('btn-zoom-in').onclick = () => {
+      state.view.zoom = Math.min(4.0, state.view.zoom * 1.25);
+      updateTransform();
+      renderCanvas();
+    };
+    document.getElementById('btn-zoom-out').onclick = () => {
+      state.view.zoom = Math.max(0.5, state.view.zoom * 0.8);
+      updateTransform();
+      renderCanvas();
+    };
+    document.getElementById('btn-zoom-reset').onclick = () => {
+      state.view.zoom = 1.0;
+      state.view.panX = 0;
+      state.view.panY = 0;
+      updateTransform();
+      renderCanvas();
+    };
+
+    // Export All PNGs
+    document.getElementById('btn-export').onclick = () => {
+      log('Compositing cutouts via photoAdapter pipeline...');
+      const mA = state.subjects.A.acceptedMask;
+      const mB = state.subjects.B.acceptedMask;
+      let mAB = state.subjects.AB.acceptedMask;
+
+      if (!mAB && mA && mB) {
+        mAB = new Uint8Array(W * H);
+        for (let i = 0; i < W * H; i++) if (mA[i] > 0 || mB[i] > 0) mAB[i] = 255;
+      }
+
+      const cutouts = [
+        { key: 'person_a', mask: mA, imgId: 'img-prev-a' },
+        { key: 'person_b', mask: mB, imgId: 'img-prev-b' },
+        { key: 'combined_ab', mask: mAB, imgId: 'img-prev-ab' },
+      ];
+
+      state.exportResults = {};
+
+      for (const c of cutouts) {
+        if (!c.mask) continue;
+        const res = composePhotoCutout(c.mask, sourceRgba, W, H, 20);
+
+        // White-backed data URL
+        const wbCanvas = document.createElement('canvas');
+        wbCanvas.width = res.whiteBackedWidth;
+        wbCanvas.height = res.whiteBackedHeight;
+        const wbCtx = wbCanvas.getContext('2d');
+        const wbImg = wbCtx.createImageData(res.whiteBackedWidth, res.whiteBackedHeight);
+        wbImg.data.set(res.whiteBackedRgba);
+        wbCtx.putImageData(wbImg, 0, 0);
+        const wbDataUrl = wbCanvas.toDataURL('image/png');
+
+        // Artwork-only data URL
+        const artCanvas = document.createElement('canvas');
+        artCanvas.width = res.artworkOnlyWidth;
+        artCanvas.height = res.artworkOnlyHeight;
+        const artCtx = artCanvas.getContext('2d');
+        const artImg = artCtx.createImageData(res.artworkOnlyWidth, res.artworkOnlyHeight);
+        artImg.data.set(res.artworkOnlyRgba);
+        artCtx.putImageData(artImg, 0, 0);
+        const artDataUrl = artCanvas.toDataURL('image/png');
+
+        document.getElementById(c.imgId).src = wbDataUrl;
+
+        state.exportResults[c.key] = {
+          whiteBackedDataUrl: wbDataUrl,
+          artworkOnlyDataUrl: artDataUrl,
+          bounds: res.bounds,
+          artworkOnlyWidth: res.artworkOnlyWidth,
+          artworkOnlyHeight: res.artworkOnlyHeight,
+          whiteBackedWidth: res.whiteBackedWidth,
+          whiteBackedHeight: res.whiteBackedHeight,
+        };
+
+        log(`Composited ${c.key}: Artwork ${res.artworkOnlyWidth}x${res.artworkOnlyHeight}, White-Backed ${res.whiteBackedWidth}x${res.whiteBackedHeight}`);
+      }
+
+      // Convert raw masks to base64 for test harness inspection
+      function maskToBase64(mask) {
+        if (!mask) return '';
+        let bin = '';
+        for (let i = 0; i < mask.length; i++) bin += String.fromCharCode(mask[i] > 0 ? 1 : 0);
+        return btoa(bin);
+      }
+
+      state.exportResults.maskABase64 = maskToBase64(mA);
+      state.exportResults.maskBBase64 = maskToBase64(mB);
+      state.exportResults.maskABCombinedBase64 = maskToBase64(mAB);
+      state.exportResults.completed = true;
+
+      log('Export complete! All stickers composited.');
+      updateStatus('Export complete.');
+    };
+
+    // Programmatic Interface for Playwright Automated Auditing & Real Interaction Testing
+    window.__PHOTO_APP__ = {
+      state,
+      initModel: () => document.getElementById('btn-init').click(),
+      encodeImage: () => document.getElementById('btn-encode').click(),
+      selectSubject: (key) => setActiveSubject(key),
+      setTool: (tool) => setActiveTool(tool),
+      setBrushRadius: (r) => {
+        state.brush.radius = r;
+        document.getElementById('brush-size').value = r;
+        document.getElementById('brush-size-val').innerText = `${r}px`;
+      },
+      addPromptPoint: (x, y, label) => {
+        const currSubj = state.subjects[state.activeSubject];
+        currSubj.points.push([x, y]);
+        currSubj.labels.push(label);
+        state.interactionStats.promptClicks++;
+        renderCanvas();
+      },
+      decode: () => document.getElementById('btn-decode').click(),
+      selectCandidate: (idx) => selectCandidate(idx),
+      applyProposal: () => document.getElementById('btn-apply-proposal').click(),
+      cancelProposal: () => document.getElementById('btn-cancel-proposal').click(),
+      applyStroke: (points, mode, radius = 20) => {
+        const currSubj = state.subjects[state.activeSubject];
+        if (!currSubj.acceptedMask) currSubj.acceptedMask = new Uint8Array(W * H);
+        const patch = applyBrushStroke(currSubj.acceptedMask, W, H, points, {
+          radius,
+          hardness: 1.0,
+          opacity: 1.0,
+          mode
+        });
+        if (patch) {
+          currSubj.history.push(patch);
+          currSubj.redoStack = [];
+          currSubj.revisionId++;
+          state.interactionStats.brushStrokes++;
+        }
+        renderCanvas();
+        return patch;
+      },
+      undo: () => document.getElementById('btn-undo').click(),
+      redo: () => document.getElementById('btn-redo').click(),
+      exportAll: () => document.getElementById('btn-export').click(),
+      getMetrics: () => {
+        const mA = state.subjects.A.acceptedMask;
+        const mB = state.subjects.B.acceptedMask;
+        const mAB = state.subjects.AB.acceptedMask;
+        let pxA = 0, pxB = 0, pxAB = 0, overlap = 0;
+        for (let i = 0; i < W * H; i++) {
+          const a = mA && mA[i] > 0;
+          const b = mB && mB[i] > 0;
+          if (a) pxA++;
+          if (b) pxB++;
+          if (a && b) overlap++;
+          if (mAB && mAB[i] > 0) pxAB++;
+        }
+        return {
+          pxA,
+          pxB,
+          pxAB,
+          overlap,
+          rFatFace: countInRegion(mA, REGIONS.fatherFace),
+          rFatSwtr: countInRegion(mA, REGIONS.fatherSweater),
+          rDauFaceInA: countInRegion(mA, REGIONS.daughterFace),
+          rDauFace: countInRegion(mB, REGIONS.daughterFace),
+          rDauJacket: countInRegion(mB, REGIONS.daughterJacket),
+          rFatFaceInB: countInRegion(mB, REGIONS.fatherFace),
+          rSleeveA: countInRegion(mA, REGIONS.disputedSleeveInA),
+          rArmB: countInRegion(mB, REGIONS.disputedArmInB),
+          effort: { ...state.interactionStats },
+          revisionA: state.subjects.A.revisionId,
+          revisionB: state.subjects.B.revisionId,
+          revisionAB: state.subjects.AB.revisionId,
+        };
+      }
+    };
+  </script>
+</body>
+</html>

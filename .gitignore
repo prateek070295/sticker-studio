@@ -11,6 +11,12 @@ build/
 
 # Test and benchmark outputs
 test-output/
+.test-fixtures/
+.photo-review-handoff/
+docs/diagnosis*/
+scripts/photo_prototype/models/
+scripts/photo_prototype/vendor/
+*.bin
 
 # Logs
 *.log

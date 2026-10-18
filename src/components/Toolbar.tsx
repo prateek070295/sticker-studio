@@ -14,11 +14,14 @@ import {
   RefreshCw,
   CheckCircle2,
   FolderOpen,
-  Save
+  Save,
+  Sparkles
 } from 'lucide-react';
-import { ViewMode } from '../types';
+import { ViewMode, AppMode } from '../types';
 
 interface ToolbarProps {
+  appMode?: AppMode;
+  onAppModeChange?: (mode: AppMode) => void;
   fileName: string;
   viewMode: ViewMode;
   onViewModeChange: (mode: ViewMode) => void;
@@ -42,9 +45,14 @@ interface ToolbarProps {
   onRefreshClick?: () => void;
   onSaveProject?: () => void;
   onLoadProject?: (file: File) => void;
+  onExportPhotoPng?: () => void;
+  onExportPhotoZip?: () => void;
+  hasPhotoCutout?: boolean;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
+  appMode = 'sheet',
+  onAppModeChange,
   fileName,
   viewMode,
   onViewModeChange,
@@ -67,7 +75,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   needRefresh,
   onRefreshClick,
   onSaveProject,
-  onLoadProject
+  onLoadProject,
+  onExportPhotoPng,
+  onExportPhotoZip,
+  hasPhotoCutout,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
@@ -105,25 +116,55 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
   return (
     <header className="h-14 bg-white border-b border-neutral-200 px-4 flex items-center justify-between select-none shadow-sm z-30">
-      {/* Left: Branding & Upload & Project Actions */}
+      {/* Left: Branding, Mode Switcher & Upload & Project Actions */}
       <div className="flex items-center gap-3">
         <button
           onClick={handleAboutClick}
           title="About Sticker Studio"
           className="flex items-center gap-2 text-left hover:opacity-85 transition cursor-pointer"
         >
-          <div className="w-8 h-8 rounded-lg bg-pink-500 flex items-center justify-center text-white font-bold text-sm shadow-sm">
-            ✂
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-sm shadow-sm ${appMode === 'photo' ? 'bg-sky-500' : 'bg-pink-500'}`}>
+            {appMode === 'photo' ? '📷' : '✂'}
           </div>
           <div>
             <h1 className="text-sm font-bold text-neutral-800 leading-tight">
               Sticker Studio
             </h1>
-            <span className="text-[11px] font-medium text-pink-600 block leading-tight">
-              Sheet Extractor
+            <span className={`text-[11px] font-medium block leading-tight ${appMode === 'photo' ? 'text-sky-600' : 'text-pink-600'}`}>
+              {appMode === 'photo' ? 'Photo Cutout' : 'Sheet Extractor'}
             </span>
           </div>
         </button>
+
+        <div className="h-6 w-px bg-neutral-200 mx-1" />
+
+        {/* Mode Selector Toggle */}
+        {onAppModeChange && (
+          <div className="flex items-center bg-neutral-100 p-0.5 rounded-lg border border-neutral-200">
+            <button
+              onClick={() => onAppModeChange('sheet')}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold transition cursor-pointer ${
+                appMode === 'sheet'
+                  ? 'bg-white text-pink-600 shadow-xs'
+                  : 'text-neutral-500 hover:text-neutral-800'
+              }`}
+            >
+              <Grid className="w-3.5 h-3.5" />
+              <span>Sheet Mode</span>
+            </button>
+            <button
+              onClick={() => onAppModeChange('photo')}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold transition cursor-pointer ${
+                appMode === 'photo'
+                  ? 'bg-white text-sky-600 shadow-xs'
+                  : 'text-neutral-500 hover:text-neutral-800'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Photo Mode</span>
+            </button>
+          </div>
+        )}
 
         <div className="h-6 w-px bg-neutral-200 mx-1" />
 
@@ -146,10 +187,18 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         <button
           onClick={handleImportClick}
           disabled={isProcessing}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-pink-50 hover:bg-pink-100 text-pink-700 font-semibold text-xs transition border border-pink-200 shadow-xs active:scale-98 disabled:opacity-50 cursor-pointer"
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold text-xs transition border shadow-xs active:scale-98 disabled:opacity-50 cursor-pointer ${
+            appMode === 'photo'
+              ? 'bg-sky-50 hover:bg-sky-100 text-sky-700 border-sky-200'
+              : 'bg-pink-50 hover:bg-pink-100 text-pink-700 border-pink-200'
+          }`}
         >
           <Upload className="w-3.5 h-3.5" />
-          <span>{fileName ? 'Import Sheet' : 'Import Sticker Sheet'}</span>
+          <span>
+            {appMode === 'photo'
+              ? fileName ? 'Import Photo' : 'Import Photo File'
+              : fileName ? 'Import Sheet' : 'Import Sticker Sheet'}
+          </span>
         </button>
 
         {onLoadProject && (
@@ -171,7 +220,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             title="Save complete project as .stickerstudio"
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-neutral-100 text-neutral-700 font-semibold text-xs transition border border-neutral-200 shadow-xs cursor-pointer"
           >
-            <Save className="w-3.5 h-3.5 text-pink-600" />
+            <Save className={`w-3.5 h-3.5 ${appMode === 'photo' ? 'text-sky-600' : 'text-pink-600'}`} />
             <span>Save Project</span>
           </button>
         )}
@@ -185,32 +234,35 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
       {/* Center: View mode & Undo/Redo */}
       <div className="flex items-center gap-2">
-        <div className="flex items-center bg-neutral-100 p-0.5 rounded-lg border border-neutral-200">
-          <button
-            onClick={() => onViewModeChange('sheet')}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition ${
-              viewMode === 'sheet'
-                ? 'bg-white text-neutral-900 shadow-xs'
-                : 'text-neutral-500 hover:text-neutral-800'
-            }`}
-          >
-            <Maximize2 className="w-3.5 h-3.5" />
-            <span>Source Sheet</span>
-          </button>
-          <button
-            onClick={() => onViewModeChange('grid')}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition ${
-              viewMode === 'grid'
-                ? 'bg-white text-neutral-900 shadow-xs'
-                : 'text-neutral-500 hover:text-neutral-800'
-            }`}
-          >
-            <LayoutGrid className="w-3.5 h-3.5" />
-            <span>Sticker Previews</span>
-          </button>
-        </div>
-
-        <div className="h-5 w-px bg-neutral-200 mx-1" />
+        {appMode === 'sheet' && (
+          <>
+            <div className="flex items-center bg-neutral-100 p-0.5 rounded-lg border border-neutral-200">
+              <button
+                onClick={() => onViewModeChange('sheet')}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition ${
+                  viewMode === 'sheet'
+                    ? 'bg-white text-neutral-900 shadow-xs'
+                    : 'text-neutral-500 hover:text-neutral-800'
+                }`}
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+                <span>Source Sheet</span>
+              </button>
+              <button
+                onClick={() => onViewModeChange('grid')}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition ${
+                  viewMode === 'grid'
+                    ? 'bg-white text-neutral-900 shadow-xs'
+                    : 'text-neutral-500 hover:text-neutral-800'
+                }`}
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+                <span>Sticker Previews</span>
+              </button>
+            </div>
+            <div className="h-5 w-px bg-neutral-200 mx-1" />
+          </>
+        )}
 
         {/* Undo / Redo */}
         <div className="flex items-center gap-1">
@@ -218,7 +270,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             onClick={onUndo}
             disabled={!canUndo}
             title="Undo (Ctrl+Z)"
-            className="p-1.5 rounded-md hover:bg-neutral-100 text-neutral-600 disabled:opacity-30 disabled:hover:bg-transparent transition"
+            className="p-1.5 rounded-md hover:bg-neutral-100 text-neutral-600 disabled:opacity-30 disabled:hover:bg-transparent transition cursor-pointer"
           >
             <Undo2 className="w-4 h-4" />
           </button>
@@ -226,7 +278,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             onClick={onRedo}
             disabled={!canRedo}
             title="Redo (Ctrl+Y)"
-            className="p-1.5 rounded-md hover:bg-neutral-100 text-neutral-600 disabled:opacity-30 disabled:hover:bg-transparent transition"
+            className="p-1.5 rounded-md hover:bg-neutral-100 text-neutral-600 disabled:opacity-30 disabled:hover:bg-transparent transition cursor-pointer"
           >
             <Redo2 className="w-4 h-4" />
           </button>
@@ -239,21 +291,21 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           <button
             onClick={() => onPreviewBgChange('checker')}
             title="Checkerboard Transparency"
-            className={`p-1.5 rounded-md transition ${previewBg === 'checker' ? 'bg-white shadow-xs text-neutral-800' : 'text-neutral-500'}`}
+            className={`p-1.5 rounded-md transition cursor-pointer ${previewBg === 'checker' ? 'bg-white shadow-xs text-neutral-800' : 'text-neutral-500'}`}
           >
             <Grid className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => onPreviewBgChange('dark')}
             title="Dark Background"
-            className={`p-1.5 rounded-md transition ${previewBg === 'dark' ? 'bg-white shadow-xs text-neutral-800' : 'text-neutral-500'}`}
+            className={`p-1.5 rounded-md transition cursor-pointer ${previewBg === 'dark' ? 'bg-white shadow-xs text-neutral-800' : 'text-neutral-500'}`}
           >
             <Moon className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => onPreviewBgChange('light')}
             title="Light Background"
-            className={`p-1.5 rounded-md transition ${previewBg === 'light' ? 'bg-white shadow-xs text-neutral-800' : 'text-neutral-500'}`}
+            className={`p-1.5 rounded-md transition cursor-pointer ${previewBg === 'light' ? 'bg-white shadow-xs text-neutral-800' : 'text-neutral-500'}`}
           >
             <Sun className="w-3.5 h-3.5" />
           </button>
@@ -294,25 +346,54 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           </button>
         )}
 
-        {selectedCount > 0 && (
-          <button
-            onClick={onExportSelected}
-            disabled={isProcessing}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-neutral-100 hover:bg-neutral-200 text-neutral-800 font-semibold text-xs transition border border-neutral-300 shadow-xs active:scale-98"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Export ({selectedCount})</span>
-          </button>
-        )}
+        {appMode === 'photo' ? (
+          hasPhotoCutout ? (
+            <>
+              {onExportPhotoZip && (
+                <button
+                  onClick={onExportPhotoZip}
+                  disabled={isProcessing}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-neutral-100 hover:bg-neutral-200 text-neutral-800 font-semibold text-xs transition border border-neutral-300 shadow-xs active:scale-98 cursor-pointer"
+                >
+                  <Archive className="w-3.5 h-3.5" />
+                  <span>Export ZIP</span>
+                </button>
+              )}
+              {onExportPhotoPng && (
+                <button
+                  onClick={onExportPhotoPng}
+                  disabled={isProcessing}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white font-semibold text-xs transition shadow-sm hover:shadow active:scale-98 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Export Sticker PNG</span>
+                </button>
+              )}
+            </>
+          ) : null
+        ) : (
+          <>
+            {selectedCount > 0 && (
+              <button
+                onClick={onExportSelected}
+                disabled={isProcessing}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-neutral-100 hover:bg-neutral-200 text-neutral-800 font-semibold text-xs transition border border-neutral-300 shadow-xs active:scale-98 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export ({selectedCount})</span>
+              </button>
+            )}
 
-        <button
-          onClick={onExportAll}
-          disabled={isProcessing || totalCount === 0}
-          className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-700 text-white font-semibold text-xs transition shadow-sm hover:shadow active:scale-98 disabled:opacity-50"
-        >
-          <Archive className="w-3.5 h-3.5" />
-          <span>Export All ({totalCount}) as ZIP</span>
-        </button>
+            <button
+              onClick={onExportAll}
+              disabled={isProcessing || totalCount === 0}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-700 text-white font-semibold text-xs transition shadow-sm hover:shadow active:scale-98 disabled:opacity-50 cursor-pointer"
+            >
+              <Archive className="w-3.5 h-3.5" />
+              <span>Export All ({totalCount}) as ZIP</span>
+            </button>
+          </>
+        )}
       </div>
     </header>
   );

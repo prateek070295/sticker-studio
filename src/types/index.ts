@@ -79,7 +79,34 @@ export interface ExtractionSettings {
   gridConfig?: GridSheetConfig;
 }
 
+export type AppMode = 'sheet' | 'photo';
 export type ViewMode = 'sheet' | 'grid';
+export type PhotoToolMode = 'pan' | 'erase' | 'restore' | 'add-person' | 'select-person';
+export type PhotoViewMode = 'sticker' | 'artwork' | 'before-after' | 'original';
+
+export interface PersonRegion {
+  id: string;
+  label: string;
+  box: BoundingBox;
+  score: number;
+  isManual: boolean;
+  included: boolean;
+  isUncertain?: boolean;
+  cropBounds?: BoundingBox;
+  cropMask?: Uint8Array; // Binary mask (cropBounds.width * cropBounds.height)
+}
+
+export interface SerializedPersonRegion {
+  id: string;
+  label: string;
+  box: BoundingBox;
+  score: number;
+  isManual: boolean;
+  included: boolean;
+  isUncertain?: boolean;
+  cropBounds?: BoundingBox;
+  maskData?: string; // Base64 RLE or mask identifier
+}
 export type ToolMode =
   | 'select'
   | 'lasso'
@@ -181,6 +208,7 @@ export interface MaskPayloadMetadata {
 export interface ProjectMetadata {
   version: '1.1';
   schemaVersion: 1 | 2;
+  projectType?: 'sheet' | 'photo';
   createdAt: number;
   updatedAt: number;
   name: string;
@@ -195,6 +223,20 @@ export interface ProjectMetadata {
   globalSolidBacking: boolean;
   globalWhiteBacking: boolean;
   gridConfig?: GridSheetConfig;
+  photoSettings?: {
+    borderThickness: number;
+    previewBg: 'checker' | 'dark' | 'light' | 'saturated';
+    hasRemovedBackground: boolean;
+    viewMode?: PhotoViewMode;
+    personRegions?: SerializedPersonRegion[];
+    selectedRegionId?: string | null;
+    isReviewMode?: boolean;
+    manualDelta?: string;
+    edgeTrim?: number;
+    bottomFinish?: 'flat' | 'rounded' | 'curved';
+    bottomCurveRadius?: number;
+    smoothOutline?: number;
+  };
 }
 
 export interface SerializedProject {

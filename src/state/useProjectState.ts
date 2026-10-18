@@ -882,6 +882,11 @@ export function useProjectState() {
     setProgress({ stage: 'components', percentage: 20, message: 'Validating & unpacking project archive...' });
     try {
       const loaded = await loadProjectArchive(file);
+      if (loaded.metadata.projectType === 'photo') {
+        setIsProcessing(false);
+        setProgress(null);
+        return loaded;
+      }
       setFileName(loaded.metadata.name);
       setSheetDimensions(loaded.metadata.imageDimensions);
       setSourceImage(loaded.sourceImage);
@@ -897,6 +902,7 @@ export function useProjectState() {
       futureRef.current = [];
       setIsProcessing(false);
       setProgress(null);
+      return loaded;
     } catch (err: unknown) {
       setIsProcessing(false);
       setProgress(null);
