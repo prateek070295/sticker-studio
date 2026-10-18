@@ -372,13 +372,15 @@ export function applyBottomTreatment(
 }
 
 /**
- * Removes small disconnected noise fragments/specks while preserving main subjects.
+ * Removes small disconnected noise fragments/specks while preserving main subjects
+ * and protected candidate bounding boxes (e.g. small legitimate detected figures).
  */
 export function cleanStrayFragments(
   mask: Uint8Array,
   width: number,
   height: number,
-  minArea: number = 200
+  minArea: number = 200,
+  protectedBoxes?: BoundingBox[]
 ): { cleanedMask: Uint8Array; removedCount: number } {
   const { components, labelMap } = analyzeComponents(mask, width, height, 1, 0);
 
@@ -395,6 +397,21 @@ export function cleanStrayFragments(
   let removed = 0;
 
   for (const c of components) {
+    // If component overlaps with any protected candidate box, protect it from deletion
+    if (protectedBoxes && protectedBoxes.length > 0) {
+      const isProtected = protectedBoxes.some(box => {
+        return !(
+          c.bounds.x + c.bounds.width < box.x ||
+          box.x + box.width < c.bounds.x ||
+          c.bounds.y + c.bounds.height < box.y ||
+          box.y + box.height < c.bounds.y
+        );
+      });
+      if (isProtected) {
+        continue;
+      }
+    }
+
     if (c.pixelCount < minArea && c.pixelCount < maxArea * 0.05) {
       removed++;
       const bx = c.bounds.x;

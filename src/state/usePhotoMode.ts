@@ -602,25 +602,24 @@ export function usePhotoMode(): UsePhotoModeReturn {
     if (!sourceImage || !mask) return;
     const W = sourceImage.width;
     const H = sourceImage.height;
-    const { cleanedMask, removedCount } = cleanStrayFragments(mask, W, H, minArea);
+    const protectedBoxes = personRegions.filter(r => r.included).map(r => r.box);
+    const { cleanedMask, removedCount } = cleanStrayFragments(mask, W, H, minArea, protectedBoxes);
     if (removedCount > 0) {
       pushUndoSnapshot();
       setMask(cleanedMask);
-      if (manualDelta) {
-        const nextDelta = new Int8Array(manualDelta);
-        for (let i = 0; i < W * H; i++) {
-          if (mask[i] > 0 && cleanedMask[i] === 0) {
-            nextDelta[i] = -1;
-          }
+      const nextDelta = manualDelta ? new Int8Array(manualDelta) : new Int8Array(W * H);
+      for (let i = 0; i < W * H; i++) {
+        if (mask[i] > 0 && cleanedMask[i] === 0) {
+          nextDelta[i] = -1;
         }
-        setManualDelta(nextDelta);
       }
+      setManualDelta(nextDelta);
       setHistoryVersion(v => v + 1);
       setProgressMessage(`Cleaned ${removedCount} stray fragment${removedCount > 1 ? 's' : ''}.`);
     } else {
       setProgressMessage('No stray fragments found.');
     }
-  }, [sourceImage, mask, manualDelta, pushUndoSnapshot]);
+  }, [sourceImage, mask, personRegions, manualDelta, pushUndoSnapshot]);
 
   const getBaseName = useCallback(() => {
     return fileName.replace(/\.[^/.]+$/, '');

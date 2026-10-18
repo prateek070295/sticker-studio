@@ -228,6 +228,44 @@ describe('Photo Finishing — Alpha Edge Trimming, Bottom Treatment & Fragment C
       expect(cleanedMask[5 * W + 5]).toBe(0);
       expect(cleanedMask[85 * W + 85]).toBe(0);
     });
+
+    it('protects legitimate tiny selected figures from removal when inside a candidate box', () => {
+      const mask = new Uint8Array(W * H);
+
+      // Main subject: 40x40 square = 1600 pixels
+      for (let y = 20; y < 60; y++) {
+        for (let x = 20; x < 60; x++) {
+          mask[y * W + x] = 1;
+        }
+      }
+
+      // Small legitimate distant person: 4x4 at (85, 85) = 16 pixels
+      for (let y = 85; y < 89; y++) {
+        for (let x = 85; x < 89; x++) {
+          mask[y * W + x] = 1;
+        }
+      }
+
+      // Stray noise island: 3x3 at (5, 5) = 9 pixels (NOT in any candidate box)
+      for (let y = 5; y < 8; y++) {
+        for (let x = 5; x < 8; x++) {
+          mask[y * W + x] = 1;
+        }
+      }
+
+      // Candidate box protecting the distant person
+      const protectedBoxes = [{ x: 80, y: 80, width: 15, height: 15 }];
+
+      const { cleanedMask, removedCount } = cleanStrayFragments(mask, W, H, 50, protectedBoxes);
+
+      // Only the stray noise at (5, 5) should be removed
+      expect(removedCount).toBe(1);
+      expect(cleanedMask[5 * W + 5]).toBe(0);
+
+      // The legitimate tiny figure at (85, 85) MUST be protected and preserved!
+      expect(cleanedMask[85 * W + 85]).toBe(1);
+      expect(cleanedMask[88 * W + 88]).toBe(1);
+    });
   });
 
   // 4. Combined applyPhotoFinishing
