@@ -59,6 +59,8 @@ export interface ProjectSaveState {
     bottomFinish?: 'flat' | 'rounded' | 'curved';
     bottomCurveRadius?: number;
     smoothOutline?: number;
+    artworkEdgeSmoothness?: number;
+    artworkEdgeFeather?: number;
   };
 }
 

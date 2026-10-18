@@ -56,11 +56,15 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
     setBorderThickness,
     setEdgeTrim,
     setSmoothOutline,
+    setArtworkEdgeSmoothness,
+    setArtworkEdgeFeather,
     setBottomFinish,
     setBottomCurveRadius,
     cleanFragments,
     edgeTrim,
     smoothOutline,
+    artworkEdgeSmoothness,
+    artworkEdgeFeather,
     bottomFinish,
     bottomCurveRadius,
     touchesBottomEdge,
@@ -1063,7 +1067,65 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
             </div>
           )}
 
-          {/* 7. Smooth Die-Cut Outline Slider */}
+          {/* Artwork Edge Smoothness (Antialiased Cutout Silhouettes) */}
+          {mask && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-neutral-700 uppercase tracking-wider">
+                  Artwork Smoothness
+                </span>
+                <span className="font-mono text-neutral-600 font-semibold">{artworkEdgeSmoothness}</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="10"
+                value={artworkEdgeSmoothness}
+                onChange={(e) => setArtworkEdgeSmoothness(Number(e.target.value))}
+                className="w-full accent-sky-500 h-1.5 bg-neutral-200 rounded-lg cursor-pointer"
+              />
+              <div className="flex justify-between text-[10px] text-neutral-400">
+                <span>0 (Original)</span>
+                <span className="text-sky-600 font-semibold">1-2 (Subtle)</span>
+                <span>3-5 (Moderate)</span>
+                <span>6-10 (Strong)</span>
+              </div>
+              {artworkEdgeSmoothness >= 6 && (
+                <div className="text-[10px] text-amber-600 font-medium bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                  Note: Strong smoothness may soften fine hair wisps.
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Artwork Edge Feather (Soft Subpixel Transition) */}
+          {mask && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-neutral-700 uppercase tracking-wider">
+                  Artwork Feather
+                </span>
+                <span className="font-mono text-neutral-600 font-semibold">{artworkEdgeFeather} px</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="3"
+                step="0.5"
+                value={artworkEdgeFeather}
+                onChange={(e) => setArtworkEdgeFeather(Number(e.target.value))}
+                className="w-full accent-sky-500 h-1.5 bg-neutral-200 rounded-lg cursor-pointer"
+              />
+              <div className="flex justify-between text-[10px] text-neutral-400">
+                <span>0 px (Crisp antialiased)</span>
+                <span>1 px</span>
+                <span>2 px</span>
+                <span>3 px (Soft)</span>
+              </div>
+            </div>
+          )}
+
+          {/* Smooth Die-Cut Outline Slider */}
           {mask && (
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs">

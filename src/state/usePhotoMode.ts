@@ -33,6 +33,8 @@ export interface UsePhotoModeReturn {
   brushSize: number;
   edgeTrim: number;
   smoothOutline: number;
+  artworkEdgeSmoothness: number;
+  artworkEdgeFeather: number;
   bottomFinish: 'flat' | 'rounded' | 'curved';
   bottomCurveRadius: number;
   touchesBottomEdge: boolean;
@@ -63,6 +65,8 @@ export interface UsePhotoModeReturn {
   setBorderThickness: (val: number) => void;
   setEdgeTrim: (val: number) => void;
   setSmoothOutline: (val: number) => void;
+  setArtworkEdgeSmoothness: (val: number) => void;
+  setArtworkEdgeFeather: (val: number) => void;
   setBottomFinish: (mode: 'flat' | 'rounded' | 'curved') => void;
   setBottomCurveRadius: (val: number) => void;
   cleanFragments: (minArea?: number) => void;
@@ -156,6 +160,8 @@ export function usePhotoMode(): UsePhotoModeReturn {
   const [borderThickness, setBorderThicknessState] = useState<number>(20);
   const [edgeTrim, setEdgeTrimState] = useState<number>(0);
   const [smoothOutline, setSmoothOutlineState] = useState<number>(0);
+  const [artworkEdgeSmoothness, setArtworkEdgeSmoothnessState] = useState<number>(0);
+  const [artworkEdgeFeather, setArtworkEdgeFeatherState] = useState<number>(0);
   const [bottomFinish, setBottomFinish] = useState<'flat' | 'rounded' | 'curved'>('flat');
   const [bottomCurveRadius, setBottomCurveRadiusState] = useState<number>(30);
   const [previewBg, setPreviewBg] = useState<'checker' | 'dark' | 'light' | 'saturated'>('checker');
@@ -219,10 +225,22 @@ export function usePhotoMode(): UsePhotoModeReturn {
       bottomFinish,
       bottomCurveRadius,
       smoothOutline,
+      artworkEdgeSmoothness,
+      artworkEdgeFeather,
     });
-    const res = composePhotoCutout(finishedMask, sourceImage.data, W, H, borderThickness, 60, smoothOutline);
+    const res = composePhotoCutout(
+      finishedMask,
+      sourceImage.data,
+      W,
+      H,
+      borderThickness,
+      60,
+      smoothOutline,
+      artworkEdgeSmoothness,
+      artworkEdgeFeather
+    );
     setComposedResult(res);
-  }, [sourceImage, mask, borderThickness, edgeTrim, bottomFinish, bottomCurveRadius, smoothOutline]);
+  }, [sourceImage, mask, borderThickness, edgeTrim, bottomFinish, bottomCurveRadius, smoothOutline, artworkEdgeSmoothness, artworkEdgeFeather]);
 
   // Load photo file
   const importPhoto = useCallback(async (file: File) => {
@@ -597,6 +615,14 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setSmoothOutlineState(Math.max(0, Math.min(10, Math.round(val))));
   }, []);
 
+  const setArtworkEdgeSmoothness = useCallback((val: number) => {
+    setArtworkEdgeSmoothnessState(Math.max(0, Math.min(10, Math.round(val))));
+  }, []);
+
+  const setArtworkEdgeFeather = useCallback((val: number) => {
+    setArtworkEdgeFeatherState(Math.max(0, Math.min(3, Math.round(val * 2) / 2)));
+  }, []);
+
   const setBottomCurveRadius = useCallback((val: number) => {
     setBottomCurveRadiusState(Math.max(5, Math.min(100, Math.round(val))));
   }, []);
@@ -806,11 +832,13 @@ export function usePhotoMode(): UsePhotoModeReturn {
         bottomFinish,
         bottomCurveRadius,
         smoothOutline,
+        artworkEdgeSmoothness,
+        artworkEdgeFeather,
       },
     });
 
     downloadBlob(zipBlob, `${getBaseName()}.stickerstudio`);
-  }, [sourceImage, mask, borderThickness, previewBg, viewMode, personRegions, selectedRegionId, isReviewMode, manualDelta, edgeTrim, bottomFinish, bottomCurveRadius, smoothOutline, getBaseName, downloadBlob]);
+  }, [sourceImage, mask, borderThickness, previewBg, viewMode, personRegions, selectedRegionId, isReviewMode, manualDelta, edgeTrim, bottomFinish, bottomCurveRadius, smoothOutline, artworkEdgeSmoothness, artworkEdgeFeather, getBaseName, downloadBlob]);
 
   // Load Photo Project
   const loadPhotoProject = useCallback((loaded: LoadedProjectData) => {
@@ -837,6 +865,8 @@ export function usePhotoMode(): UsePhotoModeReturn {
       setSelectedRegionId(loaded.metadata.photoSettings.selectedRegionId ?? null);
       setEdgeTrimState(loaded.metadata.photoSettings.edgeTrim ?? 0);
       setSmoothOutlineState(loaded.metadata.photoSettings.smoothOutline ?? 0);
+      setArtworkEdgeSmoothnessState(loaded.metadata.photoSettings.artworkEdgeSmoothness ?? 0);
+      setArtworkEdgeFeatherState(loaded.metadata.photoSettings.artworkEdgeFeather ?? 0);
       setBottomFinish(loaded.metadata.photoSettings.bottomFinish ?? 'flat');
       setBottomCurveRadiusState(loaded.metadata.photoSettings.bottomCurveRadius ?? 30);
 
@@ -882,6 +912,8 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setManualDelta(null);
     setEdgeTrimState(0);
     setSmoothOutlineState(0);
+    setArtworkEdgeSmoothnessState(0);
+    setArtworkEdgeFeatherState(0);
     setBottomFinish('flat');
     setBottomCurveRadiusState(30);
     undoStackRef.current = [];
@@ -901,6 +933,8 @@ export function usePhotoMode(): UsePhotoModeReturn {
     brushSize,
     edgeTrim,
     smoothOutline,
+    artworkEdgeSmoothness,
+    artworkEdgeFeather,
     bottomFinish,
     bottomCurveRadius,
     touchesBottomEdge,
@@ -931,6 +965,8 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setBorderThickness,
     setEdgeTrim,
     setSmoothOutline,
+    setArtworkEdgeSmoothness,
+    setArtworkEdgeFeather,
     setBottomFinish,
     setBottomCurveRadius,
     cleanFragments,

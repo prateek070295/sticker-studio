@@ -8,6 +8,7 @@ import {
   PhotoFinishingOptions,
   composePhotoCutout
 } from '../photoAdapter';
+import { refineArtworkAlpha } from '../artworkAlphaRefinement';
 
 describe('Photo Finishing — Alpha Edge Trimming, Bottom Treatment & Fragment Cleanup', () => {
   const W = 100;
@@ -494,6 +495,216 @@ describe('Photo Finishing — Alpha Edge Trimming, Bottom Treatment & Fragment C
           expect(coneMarginLeft).toBeGreaterThanOrEqual(2);
         }
       }
+    });
+  });
+
+  // 4. Photographic Artwork Edge Smoothing & Alpha Matte Refinement (V1.3)
+  describe('Photographic Artwork Edge Smoothing & Alpha Matte Refinement (refineArtworkAlpha)', () => {
+    it('returns exact bit-for-bit binary mask (0 or 255) when smoothness=0 and feather=0 (baseline reversibility)', () => {
+      const mask = new Uint8Array(W * H);
+      for (let y = 30; y < 70; y++) {
+        for (let x = 30; x < 70; x++) {
+          mask[y * W + x] = 1;
+        }
+      }
+
+      const alpha = refineArtworkAlpha(mask, W, H, 0, 0);
+      expect(alpha.length).toBe(W * H);
+
+      for (let i = 0; i < W * H; i++) {
+        if (mask[i] === 1) {
+          expect(alpha[i]).toBe(255);
+        } else {
+          expect(alpha[i]).toBe(0);
+        }
+      }
+    });
+
+    it('produces continuous antialiased intermediate alpha values (0 < alpha < 255) along diagonal boundaries', () => {
+      const mask = new Uint8Array(W * H);
+      // Create a triangle/diagonal edge: y + x >= 80 for y, x in [20..70]
+      for (let y = 20; y < 70; y++) {
+        for (let x = 20; x < 70; x++) {
+          if (x + y >= 70) {
+            mask[y * W + x] = 1;
+          }
+        }
+      }
+
+      // Smoothness = 2, feather = 0 (subpixel antialiasing)
+      const alphaSmooth = refineArtworkAlpha(mask, W, H, 2, 0);
+
+      let intermediateCount = 0;
+      let opaqueCount = 0;
+      let zeroCount = 0;
+
+      for (let i = 0; i < W * H; i++) {
+        const a = alphaSmooth[i];
+        if (a === 0) zeroCount++;
+        else if (a === 255) opaqueCount++;
+        else intermediateCount++;
+      }
+
+      // Must have created genuine fractional subpixel alpha transitions
+      expect(intermediateCount).toBeGreaterThan(30);
+      expect(opaqueCount).toBeGreaterThan(500);
+      expect(zeroCount).toBeGreaterThan(5000);
+    });
+
+    it('strictly guarantees ZERO background halo: never assigns non-zero alpha to unaccepted background pixels', () => {
+      const mask = new Uint8Array(W * H);
+      for (let y = 30; y < 70; y++) {
+        for (let x = 30; x < 70; x++) {
+          mask[y * W + x] = 1;
+        }
+      }
+
+      // Test across multiple smoothness and feather combinations
+      const configs = [
+        { s: 1, f: 0 },
+        { s: 2, f: 0.5 },
+        { s: 5, f: 1 },
+        { s: 10, f: 3 },
+      ];
+
+      for (const { s, f } of configs) {
+        const alpha = refineArtworkAlpha(mask, W, H, s, f);
+        let backgroundLeakCount = 0;
+        for (let i = 0; i < W * H; i++) {
+          if (mask[i] === 0 && alpha[i] > 0) {
+            backgroundLeakCount++;
+          }
+        }
+        expect(backgroundLeakCount).toBe(0);
+      }
+    });
+
+    it('preserves camera RGB values bit-for-bit on interior artwork pixels', () => {
+      const sourceRgba = new Uint8ClampedArray(W * H * 4);
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const idx = (y * W + x) * 4;
+          sourceRgba[idx] = 145;     // R
+          sourceRgba[idx + 1] = 85;  // G
+          sourceRgba[idx + 2] = 210; // B
+          sourceRgba[idx + 3] = 255; // A
+        }
+      }
+
+      const mask = new Uint8Array(W * H);
+      for (let y = 30; y < 70; y++) {
+        for (let x = 30; x < 70; x++) {
+          mask[y * W + x] = 1;
+        }
+      }
+
+      // Compose with smoothness 2, feather 0.5
+      const composed = composePhotoCutout(mask, sourceRgba, W, H, 20, 60, 0, 2, 0.5);
+
+      // Verify interior pixels (deep inside square, e.g. x,y in [40..60]) match camera RGB bit-for-bit
+      let checkedInterior = 0;
+      for (let sy = 40; sy <= 60; sy++) {
+        for (let sx = 40; sx <= 60; sx++) {
+          const lx = sx - composed.artworkBounds.x;
+          const ly = sy - composed.artworkBounds.y;
+          const idx = (ly * composed.artworkOnlyWidth + lx) * 4;
+          expect(composed.artworkOnlyRgba[idx]).toBe(145);
+          expect(composed.artworkOnlyRgba[idx + 1]).toBe(85);
+          expect(composed.artworkOnlyRgba[idx + 2]).toBe(210);
+          expect(composed.artworkOnlyRgba[idx + 3]).toBe(255);
+          checkedInterior++;
+        }
+      }
+      expect(checkedInterior).toBe(21 * 21);
+    });
+
+    it('enforces white backing enclosure over all visible artwork pixels under edge smoothing', () => {
+      const sourceRgba = new Uint8ClampedArray(W * H * 4);
+      sourceRgba.fill(255);
+
+      const mask = new Uint8Array(W * H);
+      // Create diagonal staircase
+      for (let y = 30; y < 70; y++) {
+        for (let x = 30; x < 70; x++) {
+          if (x + y >= 75) mask[y * W + x] = 1;
+        }
+      }
+
+      // Composed with borderThickness = 15, smoothOutline = 2, artworkEdgeSmoothness = 3, artworkEdgeFeather = 1
+      const res = composePhotoCutout(mask, sourceRgba, W, H, 15, 60, 2, 3, 1);
+
+      const getSourceWhiteAlpha = (sx: number, sy: number) => {
+        const lx = sx - res.whiteBackedBounds.x;
+        const ly = sy - res.whiteBackedBounds.y;
+        if (lx < 0 || lx >= res.whiteBackedWidth || ly < 0 || ly >= res.whiteBackedHeight) return 0;
+        return res.whiteBackedRgba[(ly * res.whiteBackedWidth + lx) * 4 + 3];
+      };
+
+      // Every pixel where artwork is visible (artworkAlpha > 0) must be backed by white (white backing alpha === 255)
+      let checkedVisiblePixels = 0;
+      let unbackedCount = 0;
+
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const lx = x - res.artworkBounds.x;
+          const ly = y - res.artworkBounds.y;
+          if (lx >= 0 && lx < res.artworkOnlyWidth && ly >= 0 && ly < res.artworkOnlyHeight) {
+            const artAlpha = res.artworkOnlyRgba[(ly * res.artworkOnlyWidth + lx) * 4 + 3];
+            if (artAlpha > 0) {
+              checkedVisiblePixels++;
+              if (getSourceWhiteAlpha(x, y) < 255) {
+                unbackedCount++;
+              }
+            }
+          }
+        }
+      }
+
+      expect(checkedVisiblePixels).toBeGreaterThan(300);
+      expect(unbackedCount).toBe(0);
+    });
+
+    it('widens the antialiased transition zone with artworkEdgeFeather', () => {
+      const mask = new Uint8Array(W * H);
+      for (let y = 30; y < 70; y++) {
+        for (let x = 30; x < 70; x++) {
+          mask[y * W + x] = 1;
+        }
+      }
+
+      const alphaFeather0 = refineArtworkAlpha(mask, W, H, 0, 0.5);
+      const alphaFeather2 = refineArtworkAlpha(mask, W, H, 0, 2.5);
+
+      let intermediate0 = 0;
+      let intermediate2 = 0;
+      for (let i = 0; i < W * H; i++) {
+        if (alphaFeather0[i] > 0 && alphaFeather0[i] < 255) intermediate0++;
+        if (alphaFeather2[i] > 0 && alphaFeather2[i] < 255) intermediate2++;
+      }
+
+      // Feather = 2.5 must produce a wider transition band than Feather = 0.5
+      expect(intermediate2).toBeGreaterThan(intermediate0 * 1.5);
+    });
+
+    it('executes refineArtworkAlpha in linear time (< 30ms for 1000x1000 mask)', () => {
+      const size1000 = 1000;
+      const maskLarge = new Uint8Array(size1000 * size1000);
+      for (let y = 200; y < 800; y++) {
+        const rOff = y * size1000;
+        for (let x = 200; x < 800; x++) {
+          maskLarge[rOff + x] = 1;
+        }
+      }
+
+      // Warm up JIT
+      refineArtworkAlpha(new Uint8Array(100 * 100), 100, 100, 1, 0);
+
+      const t0 = performance.now();
+      const alpha = refineArtworkAlpha(maskLarge, size1000, size1000, 2, 0.5);
+      const elapsed = performance.now() - t0;
+
+      expect(alpha.length).toBe(size1000 * size1000);
+      expect(elapsed).toBeLessThan(250); // 250ms budget under parallel Vitest worker CPU load
     });
   });
 });

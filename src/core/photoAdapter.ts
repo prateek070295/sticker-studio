@@ -8,12 +8,15 @@ import { ArtworkComponent, BoundingBox, StickerGroup } from '../types/index';
 import { buildGroupDistanceField, compositeSticker } from './composer';
 import { computeEuclideanDistanceTransform } from './edt';
 import { analyzeComponents } from './components';
+import { refineArtworkAlpha } from './artworkAlphaRefinement';
 
 export interface PhotoFinishingOptions {
   edgeTrim?: number; // 0 to 10 px
   bottomFinish?: 'flat' | 'rounded' | 'curved';
   bottomCurveRadius?: number; // 5 to 100 px, default 30
   smoothOutline?: number; // 0 to 10, default 0 (recommended 1-2 for portraits)
+  artworkEdgeSmoothness?: number; // 0 to 10, default 0 (subtle 1-2, moderate 3-5, strong 6-10)
+  artworkEdgeFeather?: number; // 0 to 3 px, default 0 (fractional 0.5 px steps)
 }
 
 export interface PhotoComposedResult {
@@ -35,7 +38,9 @@ export function composePhotoCutout(
   sourceHeight: number,
   borderThickness: number = 20,
   padding: number = 60,
-  smoothOutline: number = 0
+  smoothOutline: number = 0,
+  artworkEdgeSmoothness: number = 0,
+  artworkEdgeFeather: number = 0
 ): PhotoComposedResult {
   // 1. Calculate bounding box of the mask in source coordinates
   let minX = sourceWidth;
@@ -78,17 +83,23 @@ export function composePhotoCutout(
     height: maxY - minY + 1,
   };
 
-  // 2. Build isolated labelMap (label 1 for mask) and alphaMask (255 for mask)
+  // 2. Build isolated labelMap (label 1 for mask) and refined alphaMask (0..255)
   const totalPixels = sourceWidth * sourceHeight;
   const labelMap = new Uint16Array(totalPixels);
-  const alphaMask = new Uint8Array(totalPixels);
 
   for (let i = 0; i < totalPixels; i++) {
     if (mask[i] > 0) {
       labelMap[i] = 1;
-      alphaMask[i] = 255;
     }
   }
+
+  const alphaMask = refineArtworkAlpha(
+    mask,
+    sourceWidth,
+    sourceHeight,
+    artworkEdgeSmoothness,
+    artworkEdgeFeather
+  );
 
   const compId = 'photo_cutout_comp';
   const groupId = 'photo_cutout_group';
