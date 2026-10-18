@@ -9,16 +9,18 @@ import {
   ZoomOut,
   Download,
   Save,
-  Layers,
-  Eye,
-  Sliders,
   CheckCircle2,
-  AlertCircle,
   Loader2,
-  Image as ImageIcon,
-  Columns
+  UserPlus,
+  Users,
+  Eye,
+  EyeOff,
+  Trash2,
+  RefreshCw,
+  MousePointer
 } from 'lucide-react';
 import { UsePhotoModeReturn } from '../../state/usePhotoMode';
+import { BoundingBox } from '../../types';
 
 interface PhotoModeViewProps {
   photo: UsePhotoModeReturn;
@@ -36,14 +38,21 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
     brushSize,
     isProcessing,
     progressMessage,
-    modelStatus,
     composedResult,
     canUndo,
-    canRedo,
-    removeBackground,
+    personRegions,
+    selectedRegionId,
+    isReviewMode,
+    detectPeople,
+    addPersonRegion,
+    updatePersonRegion,
+    deletePersonRegion,
+    togglePersonIncluded,
+    rerunPersonSegmentation,
+    setSelectedRegionId,
+    setIsReviewMode,
     applyStroke,
     undo,
-    redo,
     setBorderThickness,
     setPreviewBg,
     setViewMode,
@@ -65,12 +74,20 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  // Cursor position in canvas coordinates (for circular reticle)
+  // Cursor position in canvas coordinates
   const [cursorPos, setCursorPos] = useState<{ x: number; y: number; onCanvas: boolean }>({ x: 0, y: 0, onCanvas: false });
 
-  // Current active drawing stroke
+  // Brush drawing state
   const isDrawingRef = useRef<boolean>(false);
   const currentStrokeRef = useRef<Array<{ x: number; y: number }>>([]);
+
+  // Interactive Bounding Box Drawing state (for Add Person tool)
+  const [drawBoxStart, setDrawBoxStart] = useState<{ x: number; y: number } | null>(null);
+  const [currentDrawBox, setCurrentDrawBox] = useState<BoundingBox | null>(null);
+
+  // Interactive Box Move/Resize state
+  const [boxDragMode, setBoxDragMode] = useState<'move' | 'resize-nw' | 'resize-ne' | 'resize-se' | 'resize-sw' | null>(null);
+  const boxDragStartRef = useRef<{ mouseX: number; mouseY: number; initialBox: BoundingBox } | null>(null);
 
   // Auto-fit image to container on initial load
   useEffect(() => {
@@ -105,10 +122,8 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
     ctx.clearRect(0, 0, W, H);
 
     if (viewMode === 'original' || !mask) {
-      // Draw untouched original photo
       ctx.putImageData(sourceImage, 0, 0);
     } else if (viewMode === 'artwork') {
-      // Draw artwork only (mask transparency)
       if (composedResult && composedResult.artworkOnlyWidth > 0) {
         const offX = composedResult.artworkBounds?.x ?? composedResult.bounds.x;
         const offY = composedResult.artworkBounds?.y ?? composedResult.bounds.y;
@@ -119,7 +134,6 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
         );
         ctx.putImageData(artImgData, offX, offY);
       } else {
-        // Fallback: render source with mask alpha
         const imgData = ctx.createImageData(W, H);
         for (let i = 0; i < W * H; i++) {
           const off = i * 4;
@@ -133,11 +147,9 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
         ctx.putImageData(imgData, 0, 0);
       }
     } else if (viewMode === 'before-after') {
-      // Left half: Original, Right half: Cutout sticker
       const splitX = Math.floor(W / 2);
       ctx.putImageData(sourceImage, 0, 0);
 
-      // Render cutout on right half
       if (composedResult && composedResult.whiteBackedWidth > 0) {
         const offX = composedResult.whiteBackedBounds?.x ?? composedResult.bounds.x;
         const offY = composedResult.whiteBackedBounds?.y ?? composedResult.bounds.y;
@@ -146,8 +158,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
           composedResult.whiteBackedWidth,
           composedResult.whiteBackedHeight
         );
-        
-        // Draw into temporary canvas to clip right half
+
         const tmpCanvas = document.createElement('canvas');
         tmpCanvas.width = W;
         tmpCanvas.height = H;
@@ -161,7 +172,6 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
         ctx.drawImage(tmpCanvas, 0, 0);
         ctx.restore();
 
-        // Divider line
         ctx.strokeStyle = '#38bdf8';
         ctx.lineWidth = 3;
         ctx.beginPath();
@@ -170,7 +180,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
         ctx.stroke();
       }
     } else {
-      // Default: 'sticker' (white-backed sticker)
+      // Default: 'sticker'
       if (composedResult && composedResult.whiteBackedWidth > 0) {
         const offX = composedResult.whiteBackedBounds?.x ?? composedResult.bounds.x;
         const offY = composedResult.whiteBackedBounds?.y ?? composedResult.bounds.y;
@@ -181,7 +191,6 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
         );
         ctx.putImageData(stickerImgData, offX, offY);
       } else {
-        // Fallback
         ctx.putImageData(sourceImage, 0, 0);
       }
     }
@@ -200,22 +209,54 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
   // Mouse / Pointer handlers
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button === 1 || toolMode === 'pan') {
-      // Middle click or pan mode -> Pan canvas
       setIsDragging(true);
       dragStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
       return;
     }
 
+    const pt = getCanvasCoords(e);
+
+    // 1. Add Person Mode -> Start drawing bounding box
+    if (e.button === 0 && toolMode === 'add-person') {
+      setDrawBoxStart(pt);
+      setCurrentDrawBox({ x: pt.x, y: pt.y, width: 0, height: 0 });
+      return;
+    }
+
+    // 2. Erase / Restore brush modes
     if (e.button === 0 && (toolMode === 'erase' || toolMode === 'restore') && mask) {
-      // Left click in brush mode -> Start stroke
       isDrawingRef.current = true;
-      const pt = getCanvasCoords(e);
       currentStrokeRef.current = [pt];
+      return;
+    }
+
+    // 3. Select Person Mode
+    if (e.button === 0 && toolMode === 'select-person') {
+      // Check if clicked inside any person region
+      const clicked = [...personRegions].reverse().find(r => {
+        return (
+          pt.x >= r.box.x &&
+          pt.x <= r.box.x + r.box.width &&
+          pt.y >= r.box.y &&
+          pt.y <= r.box.y + r.box.height
+        );
+      });
+
+      if (clicked) {
+        setSelectedRegionId(clicked.id);
+        setBoxDragMode('move');
+        boxDragStartRef.current = {
+          mouseX: pt.x,
+          mouseY: pt.y,
+          initialBox: { ...clicked.box },
+        };
+      } else {
+        setSelectedRegionId(null);
+      }
     }
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    // Update reticle cursor
     const pt = getCanvasCoords(e);
     setCursorPos({ x: pt.x, y: pt.y, onCanvas: true });
 
@@ -227,6 +268,36 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
       return;
     }
 
+    // Drawing new box in Add Person mode
+    if (drawBoxStart && toolMode === 'add-person') {
+      const x = Math.min(drawBoxStart.x, pt.x);
+      const y = Math.min(drawBoxStart.y, pt.y);
+      const width = Math.abs(pt.x - drawBoxStart.x);
+      const height = Math.abs(pt.y - drawBoxStart.y);
+      setCurrentDrawBox({ x, y, width, height });
+      return;
+    }
+
+    // Moving selected box
+    if (boxDragMode === 'move' && boxDragStartRef.current && selectedRegionId) {
+      const dx = pt.x - boxDragStartRef.current.mouseX;
+      const dy = pt.y - boxDragStartRef.current.mouseY;
+      const init = boxDragStartRef.current.initialBox;
+      const W = sourceImage?.width ?? 2000;
+      const H = sourceImage?.height ?? 2000;
+
+      const newX = Math.max(0, Math.min(W - init.width, init.x + dx));
+      const newY = Math.max(0, Math.min(H - init.height, init.y + dy));
+
+      // Local interactive preview
+      const reg = personRegions.find(r => r.id === selectedRegionId);
+      if (reg) {
+        reg.box = { ...init, x: newX, y: newY };
+      }
+      return;
+    }
+
+    // Brush stroke
     if (isDrawingRef.current && (toolMode === 'erase' || toolMode === 'restore')) {
       currentStrokeRef.current.push(pt);
     }
@@ -236,6 +307,29 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
     if (isDragging) {
       setIsDragging(false);
     }
+
+    // Finished drawing new box in Add Person mode
+    if (drawBoxStart && currentDrawBox && toolMode === 'add-person') {
+      if (currentDrawBox.width > 10 && currentDrawBox.height > 10) {
+        addPersonRegion(currentDrawBox);
+        setToolMode('select-person');
+      }
+      setDrawBoxStart(null);
+      setCurrentDrawBox(null);
+      return;
+    }
+
+    // Finished moving selected box
+    if (boxDragMode && selectedRegionId) {
+      const reg = personRegions.find(r => r.id === selectedRegionId);
+      if (reg) {
+        updatePersonRegion(selectedRegionId, reg.box);
+      }
+      setBoxDragMode(null);
+      boxDragStartRef.current = null;
+      return;
+    }
+
     if (isDrawingRef.current) {
       isDrawingRef.current = false;
       if (currentStrokeRef.current.length > 0 && (toolMode === 'erase' || toolMode === 'restore')) {
@@ -250,7 +344,6 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
     const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
     const newZoom = Math.max(0.1, Math.min(10, zoom * zoomFactor));
 
-    // Zoom centered on cursor
     if (containerRef.current) {
       const rect = containerRef.current.getBoundingClientRect();
       const mouseX = e.clientX - rect.left;
@@ -265,13 +358,14 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
     setZoom(newZoom);
   };
 
-  // Background style helper
   const getBgStyle = () => {
     if (previewBg === 'dark') return 'bg-slate-900';
     if (previewBg === 'light') return 'bg-white';
     if (previewBg === 'saturated') return 'bg-cyan-500';
-    return 'bg-checker'; // Custom CSS checkerboard
+    return 'bg-checker';
   };
+
+  const selectedCount = personRegions.filter(r => r.included).length;
 
   return (
     <div className="flex-1 flex overflow-hidden relative select-none">
@@ -284,10 +378,21 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
         onMouseLeave={() => {
           setIsDragging(false);
           isDrawingRef.current = false;
+          setDrawBoxStart(null);
+          setCurrentDrawBox(null);
+          setBoxDragMode(null);
           setCursorPos(c => ({ ...c, onCanvas: false }));
         }}
         onWheel={handleWheel}
-        className={`flex-1 relative overflow-hidden flex items-center justify-center ${getBgStyle()} ${toolMode === 'pan' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}
+        className={`flex-1 relative overflow-hidden flex items-center justify-center ${getBgStyle()} ${
+          toolMode === 'pan'
+            ? 'cursor-grab active:cursor-grabbing'
+            : toolMode === 'add-person'
+            ? 'cursor-crosshair'
+            : toolMode === 'select-person'
+            ? 'cursor-default'
+            : 'cursor-crosshair'
+        }`}
       >
         {/* Transform Layer */}
         <div
@@ -302,6 +407,102 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
             className="shadow-2xl rounded-sm block pointer-events-auto"
           />
 
+          {/* Person Regions Bounding Box Overlay */}
+          {(isReviewMode || toolMode === 'select-person' || toolMode === 'add-person' || viewMode === 'original') && (
+            <div className="absolute inset-0 pointer-events-none">
+              {personRegions.map((region) => {
+                const isSelected = region.id === selectedRegionId;
+                const isManual = region.isManual;
+                const isIncluded = region.included;
+
+                return (
+                  <div
+                    key={region.id}
+                    style={{
+                      left: `${region.box.x}px`,
+                      top: `${region.box.y}px`,
+                      width: `${region.box.width}px`,
+                      height: `${region.box.height}px`,
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedRegionId(region.id);
+                      setToolMode('select-person');
+                    }}
+                    className={`absolute pointer-events-auto transition-all ${
+                      isSelected
+                        ? 'ring-2 ring-white border-2 border-sky-400 bg-sky-400/15 z-20 shadow-lg'
+                        : isManual
+                        ? isIncluded
+                          ? 'border-2 border-pink-500 bg-pink-500/10 hover:bg-pink-500/20 z-10'
+                          : 'border-2 border-dashed border-slate-500 bg-slate-500/10 opacity-50 z-0'
+                        : isIncluded
+                        ? 'border-2 border-sky-400 bg-sky-400/10 hover:bg-sky-400/20 z-10'
+                        : 'border-2 border-dashed border-slate-500 bg-slate-500/10 opacity-50 z-0'
+                    }`}
+                  >
+                    {/* Person Badge & Controls Header */}
+                    <div
+                      style={{ transform: 'translateY(-100%)' }}
+                      className={`absolute top-0 left-0 flex items-center gap-1.5 px-2 py-0.5 rounded-t-md text-[11px] font-bold shadow-md whitespace-nowrap ${
+                        isSelected
+                          ? 'bg-sky-500 text-white'
+                          : isManual
+                          ? isIncluded
+                            ? 'bg-pink-600 text-white'
+                            : 'bg-slate-700 text-slate-300'
+                          : isIncluded
+                          ? 'bg-sky-600 text-white'
+                          : 'bg-slate-700 text-slate-300'
+                      }`}
+                    >
+                      <span>{region.label}</span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          togglePersonIncluded(region.id);
+                        }}
+                        className="p-0.5 hover:bg-black/20 rounded transition"
+                        title={region.included ? 'Exclude person' : 'Include person'}
+                      >
+                        {region.included ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+                      </button>
+                      {region.isManual && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deletePersonRegion(region.id);
+                          }}
+                          className="p-0.5 hover:bg-black/20 rounded transition text-red-200"
+                          title="Delete manual region"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {/* Live drawing preview rectangle for Add Person */}
+              {currentDrawBox && (
+                <div
+                  style={{
+                    left: `${currentDrawBox.x}px`,
+                    top: `${currentDrawBox.y}px`,
+                    width: `${currentDrawBox.width}px`,
+                    height: `${currentDrawBox.height}px`,
+                  }}
+                  className="absolute border-2 border-pink-400 border-dashed bg-pink-500/20 pointer-events-none z-30"
+                >
+                  <span className="absolute -top-6 left-0 bg-pink-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded shadow">
+                    New Person
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Interactive Brush Reticle Ring */}
           {cursorPos.onCanvas && (toolMode === 'erase' || toolMode === 'restore') && (
             <div
@@ -312,10 +513,41 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                 height: `${brushSize * 2}px`,
                 transform: 'translate(-50%, -50%)',
               }}
-              className={`absolute rounded-full border-2 pointer-events-none transition-transform duration-75 ${toolMode === 'erase' ? 'border-red-500 bg-red-500/20' : 'border-emerald-500 bg-emerald-500/20'}`}
+              className={`absolute rounded-full border-2 pointer-events-none transition-transform duration-75 ${
+                toolMode === 'erase' ? 'border-red-500 bg-red-500/20' : 'border-emerald-500 bg-emerald-500/20'
+              }`}
             />
           )}
         </div>
+
+        {/* Prominent Review Selection Banner */}
+        {isReviewMode && personRegions.length > 0 && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-slate-900/90 backdrop-blur-md px-4 py-2.5 rounded-2xl border border-slate-700/80 shadow-2xl flex items-center gap-4 text-xs text-white z-20 max-w-xl">
+            <div className="flex items-center gap-2">
+              <Users className="w-4 h-4 text-sky-400" />
+              <span className="font-bold text-sky-400">
+                {selectedCount} {selectedCount === 1 ? 'person' : 'people'} selected
+              </span>
+            </div>
+            <span className="text-slate-300 text-[11px] hidden sm:inline">
+              Review the image and add anyone missing before creating your sticker.
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setToolMode('add-person')}
+                className={`px-2.5 py-1 rounded-lg font-semibold text-xs flex items-center gap-1 transition shadow-xs ${
+                  toolMode === 'add-person'
+                    ? 'bg-pink-500 text-white ring-2 ring-pink-300'
+                    : 'bg-pink-600 hover:bg-pink-700 text-white'
+                }`}
+                title="Draw a rectangle around any person missed by detector"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>Add Person</span>
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Floating View Controls (Bottom Left) */}
         <div className="absolute bottom-5 left-5 flex items-center gap-2 bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-xl border border-slate-700/80 shadow-xl text-xs text-white z-20">
@@ -349,9 +581,9 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
           <div className="absolute inset-0 bg-slate-950/60 backdrop-blur-xs flex flex-col items-center justify-center text-white z-30">
             <div className="bg-slate-900 p-6 rounded-2xl border border-slate-700 shadow-2xl flex flex-col items-center max-w-sm text-center">
               <Loader2 className="w-8 h-8 text-sky-400 animate-spin mb-3" />
-              <h4 className="font-bold text-base mb-1">Local AI Background Removal</h4>
+              <h4 className="font-bold text-base mb-1">Local AI Person Segmentation</h4>
               <p className="text-xs text-slate-300 mb-2">{progressMessage || 'Processing photograph...'}</p>
-              <span className="text-[10px] text-slate-500 font-mono">100% Client-Side • MediaPipe Selfie Segmenter</span>
+              <span className="text-[10px] text-slate-500 font-mono">100% Client-Side • MediaPipe EfficientDet + Selfie Segmenter</span>
             </div>
           </div>
         )}
@@ -377,10 +609,10 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
         </div>
 
         <div className="p-4 space-y-6 flex-1">
-          {/* 1. Main Action: Remove Background */}
+          {/* 1. Main Action: Detect People (Detector-Guided Pipeline) */}
           <div>
             <button
-              onClick={removeBackground}
+              onClick={detectPeople}
               disabled={isProcessing}
               className={`w-full py-3 px-4 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 shadow-sm transition ${
                 mask
@@ -388,18 +620,112 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                   : 'bg-linear-to-r from-sky-500 to-blue-600 hover:from-sky-600 hover:to-blue-700 text-white shadow-md'
               }`}
             >
-              <Sparkles className="w-4 h-4" />
-              <span>{mask ? 'Re-run Background Removal' : 'Remove Background'}</span>
+              <Users className="w-4 h-4" />
+              <span>{mask ? 'Re-detect People' : 'Detect People'}</span>
             </button>
             <div className="mt-2 flex items-center justify-between text-[11px] text-neutral-400">
-              <span>Model: MediaPipe Selfie Landscape</span>
+              <span>EfficientDet-Lite0 + Selfie Crop</span>
               <span className="inline-flex items-center gap-1 text-emerald-600 font-medium">
                 <CheckCircle2 className="w-3 h-3" /> Offline Ready
               </span>
             </div>
           </div>
 
-          {/* 2. View Mode Selector */}
+          {/* 2. Detected & Manual People List */}
+          {personRegions.length > 0 && (
+            <div className="space-y-2 p-3 bg-neutral-50 rounded-xl border border-neutral-200">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-neutral-700" />
+                  <span className="text-xs font-bold text-neutral-700 uppercase tracking-wider">
+                    People ({selectedCount}/{personRegions.length})
+                  </span>
+                </div>
+                <button
+                  onClick={() => setToolMode('add-person')}
+                  className={`px-2 py-0.5 rounded text-[11px] font-semibold flex items-center gap-1 transition ${
+                    toolMode === 'add-person' ? 'bg-pink-600 text-white' : 'bg-pink-50 text-pink-700 hover:bg-pink-100'
+                  }`}
+                  title="Draw a rectangle around missing person"
+                >
+                  <UserPlus className="w-3 h-3" />
+                  <span>Add Person</span>
+                </button>
+              </div>
+
+              <div className="max-h-44 overflow-y-auto space-y-1 pr-1">
+                {personRegions.map((region) => {
+                  const isSelected = region.id === selectedRegionId;
+                  return (
+                    <div
+                      key={region.id}
+                      onClick={() => {
+                        setSelectedRegionId(region.id);
+                        setToolMode('select-person');
+                      }}
+                      className={`flex items-center justify-between p-2 rounded-lg text-xs cursor-pointer transition ${
+                        isSelected
+                          ? 'bg-sky-100/80 text-sky-900 border border-sky-300'
+                          : region.included
+                          ? 'bg-white text-neutral-800 border border-neutral-200 hover:bg-neutral-50'
+                          : 'bg-neutral-100 text-neutral-400 border border-neutral-200'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 truncate">
+                        <input
+                          type="checkbox"
+                          checked={region.included}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            togglePersonIncluded(region.id);
+                          }}
+                          className="rounded text-sky-600 focus:ring-sky-500 cursor-pointer"
+                        />
+                        <span className="font-medium truncate">{region.label}</span>
+                        {region.isManual && (
+                          <span className="px-1 py-0.2 bg-pink-100 text-pink-700 text-[10px] rounded font-semibold">
+                            Manual
+                          </span>
+                        )}
+                        {region.isUncertain && (
+                          <span className="px-1 py-0.2 bg-amber-100 text-amber-700 text-[10px] rounded font-semibold" title="Small silhouette or lower confidence">
+                            Uncertain
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            rerunPersonSegmentation(region.id);
+                          }}
+                          className="p-1 hover:bg-neutral-200 rounded text-neutral-500 transition"
+                          title="Re-run crop segmentation"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                        </button>
+                        {region.isManual && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deletePersonRegion(region.id);
+                            }}
+                            className="p-1 hover:bg-red-100 rounded text-red-500 transition"
+                            title="Delete manual person"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* 3. Display View Mode Selector */}
           {mask && (
             <div className="space-y-2">
               <label className="text-xs font-bold text-neutral-700 uppercase tracking-wider">
@@ -408,25 +734,33 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
               <div className="grid grid-cols-2 gap-1.5 p-1 bg-neutral-100 rounded-xl border border-neutral-200">
                 <button
                   onClick={() => setViewMode('sticker')}
-                  className={`py-1.5 text-xs font-medium rounded-lg transition ${viewMode === 'sticker' ? 'bg-white shadow-xs text-neutral-900' : 'text-neutral-600 hover:text-neutral-900'}`}
+                  className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                    viewMode === 'sticker' ? 'bg-white shadow-xs text-neutral-900' : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
                 >
                   Sticker Border
                 </button>
                 <button
                   onClick={() => setViewMode('artwork')}
-                  className={`py-1.5 text-xs font-medium rounded-lg transition ${viewMode === 'artwork' ? 'bg-white shadow-xs text-neutral-900' : 'text-neutral-600 hover:text-neutral-900'}`}
+                  className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                    viewMode === 'artwork' ? 'bg-white shadow-xs text-neutral-900' : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
                 >
                   Artwork Only
                 </button>
                 <button
                   onClick={() => setViewMode('before-after')}
-                  className={`py-1.5 text-xs font-medium rounded-lg transition ${viewMode === 'before-after' ? 'bg-white shadow-xs text-neutral-900' : 'text-neutral-600 hover:text-neutral-900'}`}
+                  className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                    viewMode === 'before-after' ? 'bg-white shadow-xs text-neutral-900' : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
                 >
                   Before / After
                 </button>
                 <button
                   onClick={() => setViewMode('original')}
-                  className={`py-1.5 text-xs font-medium rounded-lg transition ${viewMode === 'original' ? 'bg-white shadow-xs text-neutral-900' : 'text-neutral-600 hover:text-neutral-900'}`}
+                  className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                    viewMode === 'original' ? 'bg-white shadow-xs text-neutral-900' : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
                 >
                   Original Photo
                 </button>
@@ -434,12 +768,12 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
             </div>
           )}
 
-          {/* 3. Manual Correction Brushes */}
+          {/* 4. Tools (Box Selection & Brush Touch-ups) */}
           {mask && (
             <div className="space-y-3 p-3 bg-neutral-50 rounded-xl border border-neutral-200">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-neutral-700 uppercase tracking-wider">
-                  Touch-up Tools
+                  Interactive Tools
                 </span>
                 <div className="flex items-center gap-1">
                   <button
@@ -453,26 +787,41 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-1">
+              <div className="grid grid-cols-4 gap-1">
                 <button
                   onClick={() => setToolMode('pan')}
-                  className={`py-2 px-2 rounded-lg flex flex-col items-center gap-1 text-xs font-medium transition ${toolMode === 'pan' ? 'bg-sky-50 text-sky-700 border border-sky-200' : 'bg-white text-neutral-600 hover:bg-neutral-100 border border-neutral-200'}`}
+                  className={`py-2 px-1 rounded-lg flex flex-col items-center gap-1 text-[11px] font-medium transition ${
+                    toolMode === 'pan' ? 'bg-sky-50 text-sky-700 border border-sky-200' : 'bg-white text-neutral-600 hover:bg-neutral-100 border border-neutral-200'
+                  }`}
                 >
-                  <Hand className="w-4 h-4" />
+                  <Hand className="w-3.5 h-3.5" />
                   <span>Pan</span>
                 </button>
                 <button
-                  onClick={() => setToolMode('erase')}
-                  className={`py-2 px-2 rounded-lg flex flex-col items-center gap-1 text-xs font-medium transition ${toolMode === 'erase' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-white text-neutral-600 hover:bg-neutral-100 border border-neutral-200'}`}
+                  onClick={() => setToolMode('select-person')}
+                  className={`py-2 px-1 rounded-lg flex flex-col items-center gap-1 text-[11px] font-medium transition ${
+                    toolMode === 'select-person' ? 'bg-sky-50 text-sky-700 border border-sky-200' : 'bg-white text-neutral-600 hover:bg-neutral-100 border border-neutral-200'
+                  }`}
                 >
-                  <Eraser className="w-4 h-4" />
+                  <MousePointer className="w-3.5 h-3.5" />
+                  <span>Select</span>
+                </button>
+                <button
+                  onClick={() => setToolMode('erase')}
+                  className={`py-2 px-1 rounded-lg flex flex-col items-center gap-1 text-[11px] font-medium transition ${
+                    toolMode === 'erase' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-white text-neutral-600 hover:bg-neutral-100 border border-neutral-200'
+                  }`}
+                >
+                  <Eraser className="w-3.5 h-3.5" />
                   <span>Erase</span>
                 </button>
                 <button
                   onClick={() => setToolMode('restore')}
-                  className={`py-2 px-2 rounded-lg flex flex-col items-center gap-1 text-xs font-medium transition ${toolMode === 'restore' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-white text-neutral-600 hover:bg-neutral-100 border border-neutral-200'}`}
+                  className={`py-2 px-1 rounded-lg flex flex-col items-center gap-1 text-[11px] font-medium transition ${
+                    toolMode === 'restore' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-white text-neutral-600 hover:bg-neutral-100 border border-neutral-200'
+                  }`}
                 >
-                  <RotateCcw className="w-4 h-4" />
+                  <RotateCcw className="w-3.5 h-3.5" />
                   <span>Restore</span>
                 </button>
               </div>
@@ -496,7 +845,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
             </div>
           )}
 
-          {/* 4. White Border Thickness Slider */}
+          {/* 5. White Border Thickness Slider */}
           {mask && (
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs">
@@ -521,7 +870,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
             </div>
           )}
 
-          {/* 5. Background Preview Color */}
+          {/* 6. Background Preview Color */}
           <div className="space-y-2">
             <span className="text-xs font-bold text-neutral-700 uppercase tracking-wider">
               Preview Background
@@ -529,28 +878,36 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
             <div className="grid grid-cols-4 gap-2">
               <button
                 onClick={() => setPreviewBg('checker')}
-                className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${previewBg === 'checker' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'}`}
+                className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${
+                  previewBg === 'checker' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
+                }`}
               >
                 <div className="w-4 h-4 rounded-full border border-neutral-300 bg-checker" />
                 <span>Checker</span>
               </button>
               <button
                 onClick={() => setPreviewBg('light')}
-                className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${previewBg === 'light' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'}`}
+                className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${
+                  previewBg === 'light' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
+                }`}
               >
                 <div className="w-4 h-4 rounded-full border border-neutral-300 bg-white" />
                 <span>Light</span>
               </button>
               <button
                 onClick={() => setPreviewBg('dark')}
-                className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${previewBg === 'dark' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'}`}
+                className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${
+                  previewBg === 'dark' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
+                }`}
               >
                 <div className="w-4 h-4 rounded-full border border-neutral-700 bg-slate-900" />
                 <span>Dark</span>
               </button>
               <button
                 onClick={() => setPreviewBg('saturated')}
-                className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${previewBg === 'saturated' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'}`}
+                className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${
+                  previewBg === 'saturated' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
+                }`}
               >
                 <div className="w-4 h-4 rounded-full border border-cyan-600 bg-cyan-400" />
                 <span>Vibrant</span>
@@ -559,7 +916,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
           </div>
         </div>
 
-        {/* 6. Export & Save Actions (Sticky Footer) */}
+        {/* 7. Export & Save Actions (Sticky Footer) */}
         {mask && (
           <div className="p-4 border-t border-neutral-200 bg-neutral-50 space-y-2">
             <button

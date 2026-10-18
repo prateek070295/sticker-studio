@@ -81,8 +81,32 @@ export interface ExtractionSettings {
 
 export type AppMode = 'sheet' | 'photo';
 export type ViewMode = 'sheet' | 'grid';
-export type PhotoToolMode = 'pan' | 'erase' | 'restore';
+export type PhotoToolMode = 'pan' | 'erase' | 'restore' | 'add-person' | 'select-person';
 export type PhotoViewMode = 'sticker' | 'artwork' | 'before-after' | 'original';
+
+export interface PersonRegion {
+  id: string;
+  label: string;
+  box: BoundingBox;
+  score: number;
+  isManual: boolean;
+  included: boolean;
+  isUncertain?: boolean;
+  cropBounds?: BoundingBox;
+  cropMask?: Uint8Array; // Binary mask (cropBounds.width * cropBounds.height)
+}
+
+export interface SerializedPersonRegion {
+  id: string;
+  label: string;
+  box: BoundingBox;
+  score: number;
+  isManual: boolean;
+  included: boolean;
+  isUncertain?: boolean;
+  cropBounds?: BoundingBox;
+  maskData?: string; // Base64 RLE or mask identifier
+}
 export type ToolMode =
   | 'select'
   | 'lasso'
@@ -204,6 +228,9 @@ export interface ProjectMetadata {
     previewBg: 'checker' | 'dark' | 'light' | 'saturated';
     hasRemovedBackground: boolean;
     viewMode?: PhotoViewMode;
+    personRegions?: SerializedPersonRegion[];
+    selectedRegionId?: string | null;
+    isReviewMode?: boolean;
   };
 }
 

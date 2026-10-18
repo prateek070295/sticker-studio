@@ -51,6 +51,9 @@ export interface ProjectSaveState {
     previewBg: 'checker' | 'dark' | 'light' | 'saturated';
     hasRemovedBackground: boolean;
     viewMode?: 'sticker' | 'artwork' | 'before-after' | 'original';
+    personRegions?: import('../types').SerializedPersonRegion[];
+    selectedRegionId?: string | null;
+    isReviewMode?: boolean;
   };
 }
 

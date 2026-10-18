@@ -47,10 +47,11 @@
   </div>
 
   <script type="module">
-    import { ImageSegmenter, FilesetResolver } from '/vendor/vision_bundle.mjs';
+    import { ImageSegmenter, FilesetResolver, ObjectDetector } from '/vendor/vision_bundle.mjs';
 
     window.ImageSegmenter = ImageSegmenter;
     window.FilesetResolver = FilesetResolver;
+    window.ObjectDetector = ObjectDetector;
     window.__evalReady = true;
 
     const statusEl = document.getElementById('status');

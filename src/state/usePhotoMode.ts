@@ -1,9 +1,16 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { PhotoToolMode, PhotoViewMode } from '../types';
+import { PhotoToolMode, PhotoViewMode, PersonRegion, SerializedPersonRegion, BoundingBox } from '../types';
 import { composePhotoCutout, PhotoComposedResult } from '../core/photoAdapter';
 import { applyBrushStroke } from '../core/maskPatch';
 import { saveProjectArchive, LoadedProjectData } from '../core/projectArchive';
-import { segmentPhotoForeground, getMediaPipeSegmenter } from '../core/mediaPipeSegmenter';
+import {
+  segmentPhotoForeground,
+  getMediaPipeSegmenter,
+  getMediaPipeDetector,
+  detectPeopleInPhoto,
+  segmentPersonCrop,
+  combinePersonRegions
+} from '../core/mediaPipeSegmenter';
 import JSZip from 'jszip';
 
 export interface UsePhotoModeReturn {
@@ -22,9 +29,21 @@ export interface UsePhotoModeReturn {
   composedResult: PhotoComposedResult | null;
   canUndo: boolean;
   canRedo: boolean;
+  personRegions: PersonRegion[];
+  selectedRegionId: string | null;
+  isReviewMode: boolean;
+  stageTimings: Record<string, number>;
   importPhoto: (file: File) => Promise<void>;
   importFromDataUrl: (dataUrl: string, name: string) => Promise<void>;
+  detectPeople: () => Promise<void>;
   removeBackground: () => Promise<void>;
+  addPersonRegion: (box: BoundingBox) => Promise<void>;
+  updatePersonRegion: (id: string, box: BoundingBox) => Promise<void>;
+  deletePersonRegion: (id: string) => void;
+  togglePersonIncluded: (id: string) => void;
+  rerunPersonSegmentation: (id: string) => Promise<void>;
+  setSelectedRegionId: (id: string | null) => void;
+  setIsReviewMode: (val: boolean) => void;
   applyStroke: (points: Array<{ x: number; y: number }>, mode: 'erase' | 'restore') => void;
   undo: () => void;
   redo: () => void;
@@ -56,60 +75,28 @@ export function usePhotoMode(): UsePhotoModeReturn {
   const [modelStatus, setModelStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [composedResult, setComposedResult] = useState<PhotoComposedResult | null>(null);
 
+  // Detector-Guided Person Regions State
+  const [personRegions, setPersonRegions] = useState<PersonRegion[]>([]);
+  const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+  const [isReviewMode, setIsReviewMode] = useState<boolean>(false);
+  const [stageTimings, setStageTimings] = useState<Record<string, number>>({});
+
   // Undo / Redo history
   const undoStackRef = useRef<Uint8Array[]>([]);
   const redoStackRef = useRef<Uint8Array[]>([]);
   const [historyVersion, setHistoryVersion] = useState<number>(0);
 
   useEffect(() => {
-    // Proactively initialize and cache MediaPipe segmenter for offline usage
+    if (!sourceImage) return;
+    // When a photo is imported, warm up models in background for instant detection and offline caching
     setModelStatus('loading');
-    getMediaPipeSegmenter()
+    Promise.all([getMediaPipeSegmenter(), getMediaPipeDetector()])
       .then(() => setModelStatus('ready'))
       .catch((err) => {
         console.warn('MediaPipe background warmup deferred:', err);
         setModelStatus('idle');
       });
-  }, []);
-
-  // Worker reference
-  const workerRef = useRef<Worker | null>(null);
-
-  // Initialize or get photo segmenter worker
-  const getWorker = useCallback(() => {
-    if (workerRef.current) return workerRef.current;
-    try {
-      const worker = new Worker(
-        new URL('../workers/photoSegmenter.worker.ts', import.meta.url),
-        { type: 'module' }
-      );
-
-      worker.onmessage = (e: MessageEvent) => {
-        const data = e.data;
-        if (!data) return;
-        if (data.type === 'STATUS') {
-          setModelStatus(data.status);
-          if (data.message) setProgressMessage(data.message);
-        }
-      };
-
-      workerRef.current = worker;
-      return worker;
-    } catch (err) {
-      console.error('Failed to instantiate photo segmenter worker:', err);
-      return null;
-    }
-  }, []);
-
-  // Terminate worker on unmount
-  useEffect(() => {
-    return () => {
-      if (workerRef.current) {
-        workerRef.current.terminate();
-        workerRef.current = null;
-      }
-    };
-  }, []);
+  }, [sourceImage]);
 
   // Recompose sticker whenever mask, sourceImage, or borderThickness changes
   useEffect(() => {
@@ -118,7 +105,6 @@ export function usePhotoMode(): UsePhotoModeReturn {
       return;
     }
 
-    // Convert binary mask (0 or 1) to alpha (0 or 255) for composer
     const W = sourceImage.width;
     const H = sourceImage.height;
     const res = composePhotoCutout(mask, sourceImage.data, W, H, borderThickness);
@@ -163,48 +149,225 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setMask(null);
     setBaseAiMask(null);
     setComposedResult(null);
+    setPersonRegions([]);
+    setSelectedRegionId(null);
+    setIsReviewMode(false);
+    setStageTimings({});
     undoStackRef.current = [];
     redoStackRef.current = [];
     setHistoryVersion(v => v + 1);
+  }, []);
 
-    // Warm up worker in background
-    const worker = getWorker();
-    if (worker) {
-      worker.postMessage({ type: 'INIT_MODEL' });
-    }
-  }, [getWorker]);
-
-  // Run AI background removal
-  const removeBackground = useCallback(async () => {
+  // Run Detector-Guided People Detection and Regional Crop Segmentation
+  const detectPeople = useCallback(async () => {
     if (!sourceImage) return;
     setIsProcessing(true);
-    setProgressMessage('Preparing image for AI background removal...');
+    setProgressMessage('Scanning photo for people...');
+
+    const timings: Record<string, number> = {};
+    const tTotal0 = performance.now();
 
     try {
-      const result = await segmentPhotoForeground(sourceImage, (msg) => {
+      const tDet0 = performance.now();
+      const detected = await detectPeopleInPhoto(sourceImage, 0.003, (msg) => {
         setProgressMessage(msg);
       });
+      timings.detectionMs = performance.now() - tDet0;
 
-      // Save initial AI mask
-      const newMask = new Uint8Array(result.mask);
-      setBaseAiMask(new Uint8Array(newMask));
+      const W = sourceImage.width;
+      const H = sourceImage.height;
 
-      // Push to undo history
-      if (mask) {
-        undoStackRef.current.push(new Uint8Array(mask));
+      if (detected.length === 0) {
+        // Fallback to single-pass whole-frame segmentation if no discrete person boxes found
+        setProgressMessage('No discrete person boxes found; running whole-frame segmentation...');
+        const tSeg0 = performance.now();
+        const singleResult = await segmentPhotoForeground(sourceImage);
+        timings.segmentationMs = performance.now() - tSeg0;
+        timings.totalMs = performance.now() - tTotal0;
+
+        const newMask = new Uint8Array(singleResult.mask);
+        setBaseAiMask(new Uint8Array(newMask));
+        if (mask) undoStackRef.current.push(new Uint8Array(mask));
+        setMask(newMask);
+        setPersonRegions([]);
+        setSelectedRegionId(null);
+        setIsReviewMode(true);
+        setViewMode('sticker');
+        setStageTimings(timings);
+        setProgressMessage('Whole-frame segmentation complete.');
+        return;
       }
-      setMask(newMask);
+
+      // Perform regional crop segmentation for each detected person
+      const tCrops0 = performance.now();
+      const processedRegions: PersonRegion[] = [];
+
+      for (let i = 0; i < detected.length; i++) {
+        const reg = detected[i];
+        setProgressMessage(`Segmenting person ${i + 1} of ${detected.length}...`);
+        const { cropMask, cropBounds } = await segmentPersonCrop(sourceImage, reg, 0.20);
+        processedRegions.push({
+          ...reg,
+          cropMask,
+          cropBounds,
+        });
+      }
+      timings.segmentationMs = performance.now() - tCrops0;
+
+      // Union all regional masks in canonical source coordinates
+      const tUnion0 = performance.now();
+      const combinedMask = combinePersonRegions(processedRegions, W, H);
+      timings.unionMs = performance.now() - tUnion0;
+      timings.totalMs = performance.now() - tTotal0;
+
+      if (mask) undoStackRef.current.push(new Uint8Array(mask));
+      setMask(combinedMask);
+      setBaseAiMask(new Uint8Array(combinedMask));
+      setPersonRegions(processedRegions);
+      setSelectedRegionId(processedRegions[0]?.id ?? null);
+      setIsReviewMode(true);
       setViewMode('sticker');
+      setStageTimings(timings);
       redoStackRef.current = [];
       setHistoryVersion(v => v + 1);
-      setProgressMessage('Background removed successfully.');
+
+      setProgressMessage(`${processedRegions.length} people selected. Review the image and add anyone missing before creating your sticker.`);
     } catch (err: any) {
-      console.error('Failed to remove background:', err);
-      alert(`Background removal error: ${err?.message || err}`);
+      console.error('Failed in detectPeople:', err);
+      alert(`Person detection error: ${err?.message || err}`);
     } finally {
       setIsProcessing(false);
     }
   }, [sourceImage, mask]);
+
+  // General removeBackground: delegates to detectPeople
+  const removeBackground = useCallback(async () => {
+    await detectPeople();
+  }, [detectPeople]);
+
+  // Add Manual Person Region
+  const addPersonRegion = useCallback(async (box: BoundingBox) => {
+    if (!sourceImage) return;
+    if (box.width <= 4 || box.height <= 4) return;
+
+    setIsProcessing(true);
+    setProgressMessage('Segmenting manual person region...');
+
+    try {
+      const W = sourceImage.width;
+      const H = sourceImage.height;
+
+      const manualIndex = personRegions.filter(r => r.isManual).length + 1;
+      const newRegion: PersonRegion = {
+        id: `manual_${Date.now()}_${box.x}_${box.y}`,
+        label: `Manual ${manualIndex}`,
+        box,
+        score: 1.0,
+        isManual: true,
+        included: true,
+      };
+
+      const { cropMask, cropBounds } = await segmentPersonCrop(sourceImage, newRegion, 0.20);
+      newRegion.cropMask = cropMask;
+      newRegion.cropBounds = cropBounds;
+
+      const updatedRegions = [...personRegions, newRegion];
+      const combinedMask = combinePersonRegions(updatedRegions, W, H);
+
+      if (mask) undoStackRef.current.push(new Uint8Array(mask));
+      setMask(combinedMask);
+      setPersonRegions(updatedRegions);
+      setSelectedRegionId(newRegion.id);
+      setIsReviewMode(true);
+      redoStackRef.current = [];
+      setHistoryVersion(v => v + 1);
+
+      setProgressMessage(`Added ${newRegion.label}. ${updatedRegions.filter(r => r.included).length} people selected.`);
+    } catch (err: any) {
+      console.error('Failed to add manual person region:', err);
+      alert(`Manual region segmentation error: ${err?.message || err}`);
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [sourceImage, personRegions, mask]);
+
+  // Update Person Region Bounds (Move/Resize) and Re-segment
+  const updatePersonRegion = useCallback(async (id: string, newBox: BoundingBox) => {
+    if (!sourceImage) return;
+    const regionIdx = personRegions.findIndex(r => r.id === id);
+    if (regionIdx === -1) return;
+
+    setIsProcessing(true);
+    setProgressMessage('Updating and re-segmenting person region...');
+
+    try {
+      const W = sourceImage.width;
+      const H = sourceImage.height;
+
+      const targetRegion = { ...personRegions[regionIdx], box: newBox };
+      const { cropMask, cropBounds } = await segmentPersonCrop(sourceImage, targetRegion, 0.20);
+      targetRegion.cropMask = cropMask;
+      targetRegion.cropBounds = cropBounds;
+
+      const updated = [...personRegions];
+      updated[regionIdx] = targetRegion;
+
+      const combinedMask = combinePersonRegions(updated, W, H);
+
+      if (mask) undoStackRef.current.push(new Uint8Array(mask));
+      setMask(combinedMask);
+      setPersonRegions(updated);
+      setSelectedRegionId(id);
+      redoStackRef.current = [];
+      setHistoryVersion(v => v + 1);
+      setProgressMessage(`Updated ${targetRegion.label}.`);
+    } catch (err: any) {
+      console.error('Failed to update region:', err);
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [sourceImage, personRegions, mask]);
+
+  // Delete Person Region
+  const deletePersonRegion = useCallback((id: string) => {
+    if (!sourceImage) return;
+    const updated = personRegions.filter(r => r.id !== id);
+    const W = sourceImage.width;
+    const H = sourceImage.height;
+    const combinedMask = combinePersonRegions(updated, W, H);
+
+    if (mask) undoStackRef.current.push(new Uint8Array(mask));
+    setMask(combinedMask);
+    setPersonRegions(updated);
+    if (selectedRegionId === id) setSelectedRegionId(null);
+    redoStackRef.current = [];
+    setHistoryVersion(v => v + 1);
+    setProgressMessage(`Removed region. ${updated.filter(r => r.included).length} people selected.`);
+  }, [sourceImage, personRegions, mask, selectedRegionId]);
+
+  // Toggle Person Included
+  const togglePersonIncluded = useCallback((id: string) => {
+    if (!sourceImage) return;
+    const updated = personRegions.map(r => (r.id === id ? { ...r, included: !r.included } : r));
+    const W = sourceImage.width;
+    const H = sourceImage.height;
+    const combinedMask = combinePersonRegions(updated, W, H);
+
+    if (mask) undoStackRef.current.push(new Uint8Array(mask));
+    setMask(combinedMask);
+    setPersonRegions(updated);
+    redoStackRef.current = [];
+    setHistoryVersion(v => v + 1);
+    const count = updated.filter(r => r.included).length;
+    setProgressMessage(`${count} people selected. Review the image and add anyone missing before creating your sticker.`);
+  }, [sourceImage, personRegions, mask]);
+
+  // Rerun Person Segmentation for selected region
+  const rerunPersonSegmentation = useCallback(async (id: string) => {
+    const region = personRegions.find(r => r.id === id);
+    if (!region) return;
+    await updatePersonRegion(id, region.box);
+  }, [personRegions, updatePersonRegion]);
 
   // Apply brush strokes non-destructively
   const applyStroke = useCallback((points: Array<{ x: number; y: number }>, mode: 'erase' | 'restore') => {
@@ -213,7 +376,6 @@ export function usePhotoMode(): UsePhotoModeReturn {
     const W = sourceImage.width;
     const H = sourceImage.height;
 
-    // Convert binary mask (0 or 1) to alpha (0 or 255) for applyBrushStroke
     const currentAlpha = new Uint8Array(W * H);
     for (let i = 0; i < W * H; i++) {
       currentAlpha[i] = mask[i] > 0 ? 255 : 0;
@@ -233,11 +395,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
     );
 
     if (patch) {
-      // Save current mask to undo stack
       undoStackRef.current.push(new Uint8Array(mask));
       redoStackRef.current = [];
 
-      // Convert updated alpha back to binary mask
       const updatedMask = new Uint8Array(W * H);
       for (let i = 0; i < W * H; i++) {
         updatedMask[i] = currentAlpha[i] >= 128 ? 1 : 0;
@@ -248,7 +408,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     }
   }, [sourceImage, mask, brushSize]);
 
-  // Undo / Redo
+  // Undo
   const undo = useCallback(() => {
     if (undoStackRef.current.length === 0 || !mask) return;
     const prev = undoStackRef.current.pop()!;
@@ -257,6 +417,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setHistoryVersion(v => v + 1);
   }, [mask]);
 
+  // Redo
   const redo = useCallback(() => {
     if (redoStackRef.current.length === 0 || !mask) return;
     const next = redoStackRef.current.pop()!;
@@ -266,107 +427,130 @@ export function usePhotoMode(): UsePhotoModeReturn {
   }, [mask]);
 
   const setBorderThickness = useCallback((val: number) => {
-    setBorderThicknessState(Math.max(0, Math.min(60, Math.round(val))));
+    setBorderThicknessState(Math.max(0, Math.min(100, Math.round(val))));
   }, []);
 
-  // Helper to trigger browser download
-  const downloadBlob = (blob: Blob, name: string) => {
+  const getBaseName = useCallback(() => {
+    return fileName.replace(/\.[^/.]+$/, '');
+  }, [fileName]);
+
+  const downloadBlob = useCallback((blob: Blob, downloadFileName: string) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = name;
+    a.download = downloadFileName;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  };
+    URL.revokeObjectURL(url);
+  }, []);
 
-  const getBaseName = () => {
-    return fileName.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '_');
-  };
-
-  // Export Artwork-Only PNG (exact source RGB, transparency mask)
+  // Export Artwork-Only PNG
   const exportArtworkOnly = useCallback(async () => {
-    if (!composedResult || composedResult.artworkOnlyWidth === 0) {
-      alert('Please remove background or import a photo first.');
-      return;
-    }
+    if (!composedResult || composedResult.artworkOnlyRgba.length === 0) return;
+    const { artworkOnlyRgba, artworkOnlyWidth, artworkOnlyHeight } = composedResult;
 
-    const { artworkOnlyRgba, artworkOnlyWidth: w, artworkOnlyHeight: h } = composedResult;
     const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
+    canvas.width = artworkOnlyWidth;
+    canvas.height = artworkOnlyHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const imgData = new ImageData(artworkOnlyRgba, w, h);
+    const imgData = new ImageData(artworkOnlyRgba, artworkOnlyWidth, artworkOnlyHeight);
     ctx.putImageData(imgData, 0, 0);
 
-    const blob = await new Promise<Blob | null>(r => canvas.toBlob(r, 'image/png'));
-    if (blob) {
-      downloadBlob(blob, `${getBaseName()}_artwork_only.png`);
-    }
-  }, [composedResult, fileName]);
+    canvas.toBlob((blob) => {
+      if (blob) downloadBlob(blob, `${getBaseName()}_artwork_only.png`);
+    }, 'image/png');
+  }, [composedResult, getBaseName, downloadBlob]);
 
   // Export White-Backed Sticker PNG
   const exportWhiteBacked = useCallback(async () => {
-    if (!composedResult || composedResult.whiteBackedWidth === 0) {
-      alert('Please remove background or import a photo first.');
-      return;
-    }
+    if (!composedResult || composedResult.whiteBackedRgba.length === 0) return;
+    const { whiteBackedRgba, whiteBackedWidth, whiteBackedHeight } = composedResult;
 
-    const { whiteBackedRgba, whiteBackedWidth: w, whiteBackedHeight: h } = composedResult;
     const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
+    canvas.width = whiteBackedWidth;
+    canvas.height = whiteBackedHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const imgData = new ImageData(whiteBackedRgba, w, h);
+    const imgData = new ImageData(whiteBackedRgba, whiteBackedWidth, whiteBackedHeight);
     ctx.putImageData(imgData, 0, 0);
 
-    const blob = await new Promise<Blob | null>(r => canvas.toBlob(r, 'image/png'));
-    if (blob) {
-      downloadBlob(blob, `${getBaseName()}_sticker.png`);
-    }
-  }, [composedResult, fileName]);
+    canvas.toBlob((blob) => {
+      if (blob) downloadBlob(blob, `${getBaseName()}_white_backed.png`);
+    }, 'image/png');
+  }, [composedResult, getBaseName, downloadBlob]);
 
-  // Export Both as ZIP
+  // Export ZIP package
   const exportZip = useCallback(async () => {
-    if (!composedResult || composedResult.artworkOnlyWidth === 0) {
-      alert('Please remove background or import a photo first.');
-      return;
+    if (!composedResult || !sourceImage) return;
+    const zip = new JSZip();
+
+    // 1. Artwork only PNG
+    if (composedResult.artworkOnlyRgba.length > 0) {
+      const artCanvas = document.createElement('canvas');
+      artCanvas.width = composedResult.artworkOnlyWidth;
+      artCanvas.height = composedResult.artworkOnlyHeight;
+      const ctx = artCanvas.getContext('2d');
+      if (ctx) {
+        ctx.putImageData(
+          new ImageData(composedResult.artworkOnlyRgba, composedResult.artworkOnlyWidth, composedResult.artworkOnlyHeight),
+          0,
+          0
+        );
+        const artBlob = await new Promise<Blob | null>(r => artCanvas.toBlob(r, 'image/png'));
+        if (artBlob) zip.file(`${getBaseName()}_artwork_only.png`, artBlob);
+      }
     }
 
-    const zip = new JSZip();
-    const baseName = getBaseName();
-
-    // 1. Artwork only
-    const canvasArt = document.createElement('canvas');
-    canvasArt.width = composedResult.artworkOnlyWidth;
-    canvasArt.height = composedResult.artworkOnlyHeight;
-    canvasArt.getContext('2d')?.putImageData(new ImageData(composedResult.artworkOnlyRgba, canvasArt.width, canvasArt.height), 0, 0);
-    const artBlob = await new Promise<Blob | null>(r => canvasArt.toBlob(r, 'image/png'));
-    if (artBlob) zip.file(`${baseName}_artwork_only.png`, artBlob);
-
-    // 2. White backed
-    const canvasWhite = document.createElement('canvas');
-    canvasWhite.width = composedResult.whiteBackedWidth;
-    canvasWhite.height = composedResult.whiteBackedHeight;
-    canvasWhite.getContext('2d')?.putImageData(new ImageData(composedResult.whiteBackedRgba, canvasWhite.width, canvasWhite.height), 0, 0);
-    const whiteBlob = await new Promise<Blob | null>(r => canvasWhite.toBlob(r, 'image/png'));
-    if (whiteBlob) zip.file(`${baseName}_sticker.png`, whiteBlob);
+    // 2. White-backed sticker PNG
+    if (composedResult.whiteBackedRgba.length > 0) {
+      const wbCanvas = document.createElement('canvas');
+      wbCanvas.width = composedResult.whiteBackedWidth;
+      wbCanvas.height = composedResult.whiteBackedHeight;
+      const ctx = wbCanvas.getContext('2d');
+      if (ctx) {
+        ctx.putImageData(
+          new ImageData(composedResult.whiteBackedRgba, composedResult.whiteBackedWidth, composedResult.whiteBackedHeight),
+          0,
+          0
+        );
+        const wbBlob = await new Promise<Blob | null>(r => wbCanvas.toBlob(r, 'image/png'));
+        if (wbBlob) zip.file(`${getBaseName()}_white_backed.png`, wbBlob);
+      }
+    }
 
     const zipBlob = await zip.generateAsync({ type: 'blob' });
-    downloadBlob(zipBlob, `${baseName}_cutout_stickers.zip`);
-  }, [composedResult, fileName]);
+    downloadBlob(zipBlob, `${getBaseName()}_cutout_stickers.zip`);
+  }, [composedResult, sourceImage, getBaseName, downloadBlob]);
 
-  // Save Project as .stickerstudio archive
-  const savePhotoProject = useCallback(async () => {
-    if (!sourceImage || !mask) {
-      alert('No photo or cutout mask to save.');
-      return;
+  // Helper to encode Uint8Array to base64
+  const uint8ToBase64 = (bytes: Uint8Array): string => {
+    let binary = '';
+    const len = bytes.byteLength;
+    const chunkSize = 16384;
+    for (let i = 0; i < len; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunkSize, len)) as any);
     }
+    return btoa(binary);
+  };
+
+  // Helper to decode base64 to Uint8Array
+  const base64ToUint8 = (base64: string): Uint8Array => {
+    const binary = atob(base64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  };
+
+  // Save Photo Project (.stickerstudio)
+  const savePhotoProject = useCallback(async () => {
+    if (!sourceImage || !mask) return;
 
     const W = sourceImage.width;
     const H = sourceImage.height;
@@ -374,6 +558,18 @@ export function usePhotoMode(): UsePhotoModeReturn {
     for (let i = 0; i < W * H; i++) {
       alphaMask[i] = mask[i] > 0 ? 255 : 0;
     }
+
+    // Serialize person regions with their masks
+    const serializedRegions: SerializedPersonRegion[] = personRegions.map(r => ({
+      id: r.id,
+      label: r.label,
+      box: r.box,
+      score: r.score,
+      isManual: r.isManual,
+      included: r.included,
+      cropBounds: r.cropBounds,
+      maskData: r.cropMask ? uint8ToBase64(r.cropMask) : undefined,
+    }));
 
     const zipBlob = await saveProjectArchive({
       name: getBaseName(),
@@ -398,11 +594,14 @@ export function usePhotoMode(): UsePhotoModeReturn {
         previewBg,
         hasRemovedBackground: true,
         viewMode,
+        personRegions: serializedRegions,
+        selectedRegionId,
+        isReviewMode,
       },
     });
 
     downloadBlob(zipBlob, `${getBaseName()}.stickerstudio`);
-  }, [sourceImage, mask, borderThickness, previewBg, viewMode, fileName]);
+  }, [sourceImage, mask, borderThickness, previewBg, viewMode, personRegions, selectedRegionId, isReviewMode, getBaseName, downloadBlob]);
 
   // Load Photo Project
   const loadPhotoProject = useCallback((loaded: LoadedProjectData) => {
@@ -425,6 +624,24 @@ export function usePhotoMode(): UsePhotoModeReturn {
       if (loaded.metadata.photoSettings.viewMode) {
         setViewMode(loaded.metadata.photoSettings.viewMode);
       }
+      setIsReviewMode(loaded.metadata.photoSettings.isReviewMode ?? false);
+      setSelectedRegionId(loaded.metadata.photoSettings.selectedRegionId ?? null);
+
+      if (loaded.metadata.photoSettings.personRegions && loaded.metadata.photoSettings.personRegions.length > 0) {
+        const restoredRegions: PersonRegion[] = loaded.metadata.photoSettings.personRegions.map(sr => ({
+          id: sr.id,
+          label: sr.label,
+          box: sr.box,
+          score: sr.score,
+          isManual: sr.isManual,
+          included: sr.included,
+          cropBounds: sr.cropBounds,
+          cropMask: sr.maskData ? base64ToUint8(sr.maskData) : undefined,
+        }));
+        setPersonRegions(restoredRegions);
+      } else {
+        setPersonRegions([]);
+      }
     }
 
     undoStackRef.current = [];
@@ -437,6 +654,10 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setMask(null);
     setBaseAiMask(null);
     setComposedResult(null);
+    setPersonRegions([]);
+    setSelectedRegionId(null);
+    setIsReviewMode(false);
+    setStageTimings({});
     setViewMode('sticker');
     undoStackRef.current = [];
     redoStackRef.current = [];
@@ -459,9 +680,21 @@ export function usePhotoMode(): UsePhotoModeReturn {
     composedResult,
     canUndo: undoStackRef.current.length > 0,
     canRedo: redoStackRef.current.length > 0,
+    personRegions,
+    selectedRegionId,
+    isReviewMode,
+    stageTimings,
     importPhoto,
     importFromDataUrl,
+    detectPeople,
     removeBackground,
+    addPersonRegion,
+    updatePersonRegion,
+    deletePersonRegion,
+    togglePersonIncluded,
+    rerunPersonSegmentation,
+    setSelectedRegionId,
+    setIsReviewMode,
     applyStroke,
     undo,
     redo,
