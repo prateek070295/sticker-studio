@@ -218,9 +218,11 @@ export function computeEffectiveHeadTransform(
   const effectiveCenterX = Math.round(effectiveTargetChinX - rotChinX);
   const effectiveCenterY = Math.round(effectiveTargetChinY - rotChinY);
 
-  const hairBehind = basePlacement.hairBehindBody !== undefined
-    ? basePlacement.hairBehindBody
-    : (headSlot.hairLayering === 'behind');
+  const hairBehind = individualAlignment?.hairBehindBody !== undefined
+    ? individualAlignment.hairBehindBody
+    : (basePlacement.hairBehindBody !== undefined
+      ? basePlacement.hairBehindBody
+      : (headSlot.hairLayering === 'behind'));
 
   return {
     centerX: effectiveCenterX,
@@ -230,6 +232,68 @@ export function computeEffectiveHeadTransform(
     hairBehindBody: hairBehind,
     autoPlacement: auto,
   };
+}
+
+/**
+ * Inverts an accepted legacy HeadTransform (from V3 or V4) into an IndividualHeadAlignment
+ * relative to the template's baseline auto-placement.
+ *
+ * When combined with neutral global alignment, computeEffectiveHeadTransform will reproduce
+ * the legacy transform bitwise. When global alignment adjustments are made, they compound cleanly
+ * on top, and resetting global alignment restores the legacy placement without drift.
+ */
+export function convertLegacyTransformToIndividualAlignment(
+  template: CartoonTemplateManifest,
+  head: ExtractedHeadResult,
+  savedTransform: HeadTransform,
+  calibratedChin?: { x: number; y: number } | null
+): IndividualHeadAlignment {
+  const { canvas, headSlot } = template;
+  const canvasW = canvas.width;
+  const canvasH = canvas.height;
+
+  const auto = savedTransform.autoPlacement || computeInitialHeadPlacement(template, head, calibratedChin);
+  const baseScale = auto.scale;
+  const baseRotation = auto.rotationDegrees;
+
+  // 1. Relative scale multiplier
+  const scaleMultiplier = baseScale > 0 ? parseFloat((savedTransform.scale / baseScale).toFixed(4)) : 1.0;
+
+  // 2. Relative rotation delta
+  const rotationDelta = parseFloat((savedTransform.rotationDegrees - baseRotation).toFixed(2));
+
+  // 3. Translation offsets relative to template face height
+  const slotCenterX = headSlot.centerX * canvasW;
+  const targetChinX = slotCenterX;
+  const targetChinY = (headSlot.targetChinY ?? 0.50) * canvasH;
+  const faceH = (headSlot.targetFaceH ?? 0.254) * canvasH;
+
+  const chinCrop = getPhotographicChinCropAnchor(head, calibratedChin);
+  const dx = chinCrop.x - head.width * 0.5;
+  const dy = chinCrop.y - head.height * 0.5;
+
+  const rad = (savedTransform.rotationDegrees * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+
+  const rotChinX = (dx * cos - dy * sin) * savedTransform.scale;
+  const rotChinY = (dx * sin + dy * cos) * savedTransform.scale;
+
+  const offsetX = parseFloat(((savedTransform.centerX + rotChinX - targetChinX) / faceH).toFixed(5));
+  const offsetY = parseFloat(((savedTransform.centerY + rotChinY - targetChinY) / faceH).toFixed(5));
+
+  const result: IndividualHeadAlignment = {
+    scaleMultiplier,
+    rotationDelta,
+    offsetX,
+    offsetY,
+  };
+
+  if (savedTransform.hairBehindBody !== undefined) {
+    result.hairBehindBody = savedTransform.hairBehindBody;
+  }
+
+  return result;
 }
 
 export function createCompatibleCanvas(width: number, height: number): HTMLCanvasElement {

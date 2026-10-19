@@ -98,6 +98,8 @@ export interface IndividualHeadAlignment {
   offsetX: number;
   /** Template-specific vertical offset normalized relative to template face height (default: 0) */
   offsetY: number;
+  /** Whether long hair is layered behind the cartoon body for this template */
+  hairBehindBody?: boolean;
 }
 
 export interface HeadTransform {

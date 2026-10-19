@@ -426,11 +426,16 @@ async function runReleaseChecks() {
   await calibrateChinBtn.click();
   await page.waitForSelector('text=Calibrate Photographic Chin Anchor', { timeout: 10000 });
 
-  // Click on calibration area
+  // Click on calibration area and drag
   const calibCanvas = page.locator('div.cursor-crosshair');
   const calibBox = await calibCanvas.boundingBox();
   if (!calibBox) throw new Error('Calibration modal box not found!');
-  await page.mouse.click(calibBox.x + calibBox.width / 2, calibBox.y + calibBox.height / 2 + 30);
+  const clickX = calibBox.x + calibBox.width / 2;
+  const clickY = calibBox.y + calibBox.height / 2 + 20;
+  await page.mouse.move(clickX, clickY);
+  await page.mouse.down();
+  await page.mouse.move(clickX + 5, clickY + 10, { steps: 5 });
+  await page.mouse.up();
   await page.waitForTimeout(200);
 
   // Capture Screenshot of Chin Calibration Modal
@@ -747,15 +752,85 @@ async function runReleaseChecks() {
     if (legacyState.global.scaleMultiplier !== 1.0 || legacyState.global.rotationDelta !== 0 || legacyState.global.offsetY !== 0) {
       throw new Error(`Legacy project global alignment not neutral: ${JSON.stringify(legacyState.global)}`);
     }
-    if (Object.keys(legacyState.individual).length !== 0) {
-      throw new Error(`Legacy project individual alignments not empty: ${JSON.stringify(legacyState.individual)}`);
+    // Verify that legacy manual adjustments were migrated to individualHeadAlignments
+    if (!legacyState.individual['hi-waving-01'] || !legacyState.individual['love-you-02']) {
+      throw new Error(`Legacy manual adjustments not migrated to individual alignments: ${JSON.stringify(legacyState.individual)}`);
     }
+    console.log('  ✓ Migrated legacy individual alignments:', Object.keys(legacyState.individual));
     if (legacyState.chin !== null) {
       throw new Error(`Legacy project calibrated chin not null: ${legacyState.chin}`);
     }
     if (legacyState.border01 !== 36 || legacyState.border02 !== 16) {
       throw new Error(`Legacy custom borders not preserved: 01=${legacyState.border01}, 02=${legacyState.border02}`);
     }
+
+    // Verify bitwise transform preservation for hi-waving-01 and love-you-02
+    const tfCheck = await page.evaluate(() => {
+      const st = window.__lastCartoonState;
+      return {
+        hiScale: st.templateTransforms['hi-waving-01'].scale,
+        loveHairBehind: st.templateTransforms['love-you-02'].hairBehindBody,
+      };
+    });
+    if (Math.abs(tfCheck.hiScale - 1.1) > 0.005) {
+      throw new Error(`Legacy hi-waving-01 scale not preserved: expected 1.1, got ${tfCheck.hiScale}`);
+    }
+    if (tfCheck.loveHairBehind !== false) {
+      throw new Error(`Legacy love-you-02 hairBehindBody not preserved: expected false, got ${tfCheck.loveHairBehind}`);
+    }
+    console.log('  ✓ Legacy manual transform values (scale 1.1, hairBehindBody: false) preserved bitwise.');
+
+    // Test Detail Mode Head Scale slider on migrated sticker
+    console.log('  Testing Detail Mode Head Scale slider on migrated Sticker 01...');
+    const tune01Btn = page.locator('button:has-text("Tune")').first();
+    await tune01Btn.click();
+    await page.waitForSelector('text=Head Scale', { timeout: 10000 });
+
+    const scaleText = await page.locator('text=Head Scale').locator('..').locator('span.font-mono').textContent();
+    console.log(`    Detail Mode Head Scale displays: ${scaleText}`);
+    if (scaleText !== '61%') {
+      throw new Error(`Expected Detail Mode Head Scale to show 61%, got ${scaleText}`);
+    }
+
+    // Return to Gallery
+    await page.click('button:has-text("Back to Reactions Pack")');
+    await page.waitForSelector('text=Pack Collection:', { timeout: 10000 });
+
+    // Test compounding global adjustment on top of legacy project
+    console.log('  Testing global alignment adjustment on top of legacy project...');
+    const adjustAllLegacyBtn = page.locator('button:has-text("Adjust All Heads")').first();
+    await adjustAllLegacyBtn.click();
+    await page.waitForSelector('text=Smart Pack-Wide Head Alignment', { timeout: 10000 });
+
+    const sizeSliderLegacy = page.locator('input[type="range"][min="75"][max="135"]');
+    await setRangeValue(sizeSliderLegacy, 110);
+    await page.waitForTimeout(300);
+
+    const compoundCheck = await page.evaluate(() => {
+      return window.__lastCartoonState.templateTransforms['hi-waving-01'].scale;
+    });
+    const expectedComp = parseFloat((1.1 * 1.10).toFixed(4));
+    if (Math.abs(compoundCheck - expectedComp) > 0.005) {
+      throw new Error(`Compound scale mismatch on legacy project: expected ${expectedComp}, got ${compoundCheck}`);
+    }
+    console.log(`    Compounded scale on hi-waving-01: ${compoundCheck} (expected ${expectedComp})`);
+
+    // Reset global alignment
+    console.log('  Resetting global alignment back to neutral...');
+    const resetGlobalBtn = page.locator('button:has-text("Reset Global Alignment")');
+    await resetGlobalBtn.click();
+    await page.waitForTimeout(300);
+
+    const resetCheck = await page.evaluate(() => {
+      return window.__lastCartoonState.templateTransforms['hi-waving-01'].scale;
+    });
+    if (Math.abs(resetCheck - 1.1) > 0.005) {
+      throw new Error(`Reset global alignment failed to restore legacy scale 1.1: got ${resetCheck}`);
+    }
+    console.log('  ✓ Reset global alignment restored exact legacy placement (1.10).');
+
+    await page.click('button:has-text("Done")');
+    await page.waitForSelector('text=Pack Collection:', { timeout: 10000 });
 
     const uiLegacyPath = path.join(OUTPUT_DIR, 'ui_legacy_v4_reopened.png');
     await page.screenshot({ path: uiLegacyPath });

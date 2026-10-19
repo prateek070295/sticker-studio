@@ -16,6 +16,7 @@ import { extractPhotographicHead } from '../core/cartoonHeadExtractor';
 import {
   computeInitialHeadPlacement,
   computeEffectiveHeadTransform,
+  convertLegacyTransformToIndividualAlignment,
   renderCartoonArtwork,
   generateCartoonStickerDieCut,
 } from '../core/cartoonCompositor';
@@ -605,20 +606,24 @@ export function useCartoonMode(): UseCartoonModeReturn {
         nextAlignments[templateId] = {
           scaleMultiplier:
             update.scaleMultiplier !== undefined
-              ? Math.max(0.75, Math.min(1.35, parseFloat(update.scaleMultiplier.toFixed(3))))
+              ? Math.max(0.2, Math.min(3.0, parseFloat(update.scaleMultiplier.toFixed(4))))
               : (current.scaleMultiplier ?? 1.0),
           rotationDelta:
             update.rotationDelta !== undefined
-              ? Math.max(-15, Math.min(15, parseFloat(update.rotationDelta.toFixed(1))))
+              ? Math.max(-45, Math.min(45, parseFloat(update.rotationDelta.toFixed(1))))
               : (current.rotationDelta ?? 0),
           offsetX:
             update.offsetX !== undefined
-              ? Math.max(-0.5, Math.min(0.5, parseFloat(update.offsetX.toFixed(4))))
+              ? Math.max(-1.5, Math.min(1.5, parseFloat(update.offsetX.toFixed(5))))
               : (current.offsetX ?? 0),
           offsetY:
             update.offsetY !== undefined
-              ? Math.max(-0.5, Math.min(0.5, parseFloat(update.offsetY.toFixed(4))))
+              ? Math.max(-1.5, Math.min(1.5, parseFloat(update.offsetY.toFixed(5))))
               : (current.offsetY ?? 0),
+          hairBehindBody:
+            update.hairBehindBody !== undefined
+              ? update.hairBehindBody
+              : current.hairBehindBody,
         };
       }
       setIndividualHeadAlignmentsState(nextAlignments);
@@ -828,6 +833,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
         rotationDelta: newRotationDelta,
         offsetX: newOffsetX,
         offsetY: newOffsetY,
+        hairBehindBody: update.hairBehindBody !== undefined ? update.hairBehindBody : curInd.hairBehindBody,
       });
     },
     [
@@ -1449,12 +1455,35 @@ export function useCartoonMode(): UseCartoonModeReturn {
           setUndoStack([]);
           setRedoStack([]);
 
-          let restoredTransforms: Record<string, HeadTransform>;
-          if (proj.version === 5 || !proj.templateTransforms) {
-            restoredTransforms = computeAllTransforms(restoredHead, gAlign, iAligns, cChin);
-          } else {
-            restoredTransforms = proj.templateTransforms;
+          let finalAlignments: Record<string, IndividualHeadAlignment> = { ...iAligns };
+          if ((proj.version ?? 0) < 5 || !proj.individualHeadAlignments) {
+            for (const t of CARTOON_REACTIONS_PACK) {
+              const savedTf =
+                (proj.templateTransforms && proj.templateTransforms[t.id]) ||
+                (t.id === (proj.templateId || tpl.id) ? proj.headTransform : null);
+              if (savedTf) {
+                const auto = computeInitialHeadPlacement(t, restoredHead, cChin);
+                const hasDiff =
+                  savedTf.centerX !== auto.centerX ||
+                  savedTf.centerY !== auto.centerY ||
+                  Math.abs(savedTf.scale - auto.scale) > 0.0001 ||
+                  Math.abs(savedTf.rotationDegrees - auto.rotationDegrees) > 0.01 ||
+                  (savedTf.hairBehindBody !== undefined && savedTf.hairBehindBody !== auto.hairBehindBody);
+
+                if (hasDiff) {
+                  finalAlignments[t.id] = convertLegacyTransformToIndividualAlignment(
+                    t,
+                    restoredHead,
+                    savedTf,
+                    cChin
+                  );
+                }
+              }
+            }
+            setIndividualHeadAlignmentsState(finalAlignments);
           }
+
+          const restoredTransforms = computeAllTransforms(restoredHead, gAlign, finalAlignments, cChin);
           setTemplateTransforms(restoredTransforms);
 
           const curTransform = restoredTransforms[tpl.id] || proj.headTransform;

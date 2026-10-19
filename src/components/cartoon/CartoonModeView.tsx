@@ -52,14 +52,37 @@ const ChinCalibrationModal: React.FC<{
     ctx.drawImage(head.canvas, 0, 0);
   }, [head]);
 
-  const handlePointerDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = Math.round(((e.clientX - rect.left) / rect.width) * head.width);
-    const y = Math.round(((e.clientY - rect.top) / rect.height) * head.height);
-    setPin({
-      x: Math.max(0, Math.min(head.width, x)),
-      y: Math.max(0, Math.min(head.height, y)),
-    });
+  const updatePinFromClientCoords = useCallback(
+    (clientX: number, clientY: number) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const relX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      const relY = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+      const x = Math.round(relX * head.width);
+      const y = Math.round(relY * head.height);
+      setPin({
+        x: Math.max(0, Math.min(head.width, x)),
+        y: Math.max(0, Math.min(head.height, y)),
+      });
+    },
+    [head.width, head.height]
+  );
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    updatePinFromClientCoords(e.clientX, e.clientY);
+
+    const onPointerMove = (ev: PointerEvent) => {
+      updatePinFromClientCoords(ev.clientX, ev.clientY);
+    };
+    const onPointerUp = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
   };
 
   return (
@@ -72,25 +95,28 @@ const ChinCalibrationModal: React.FC<{
           </p>
         </div>
 
-        <div
-          onMouseDown={handlePointerDown}
-          className="relative w-full aspect-square bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 cursor-crosshair flex items-center justify-center checkerboard-bg"
-        >
-          <canvas ref={canvasRef} className="max-w-full max-h-full object-contain pointer-events-none" />
+        <div className="relative w-full aspect-square bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 flex items-center justify-center checkerboard-bg">
           <div
-            style={{
-              left: `${(pin.x / head.width) * 100}%`,
-              top: `${(pin.y / head.height) * 100}%`,
-              transform: 'translate(-50%, -50%)',
-            }}
-            className="absolute pointer-events-none flex flex-col items-center"
+            onPointerDown={handlePointerDown}
+            style={{ aspectRatio: `${head.width} / ${head.height}` }}
+            className="relative max-w-full max-h-full cursor-crosshair select-none flex items-center justify-center"
           >
-            <div className="w-5 h-5 rounded-full border-2 border-amber-400 bg-amber-500/40 shadow-lg flex items-center justify-center">
-              <div className="w-1.5 h-1.5 rounded-full bg-amber-300" />
+            <canvas ref={canvasRef} className="w-full h-full object-contain pointer-events-none block" />
+            <div
+              style={{
+                left: `${(pin.x / head.width) * 100}%`,
+                top: `${(pin.y / head.height) * 100}%`,
+                transform: 'translate(-50%, -50%)',
+              }}
+              className="absolute pointer-events-none flex flex-col items-center"
+            >
+              <div className="w-5 h-5 rounded-full border-2 border-amber-400 bg-amber-500/40 shadow-lg flex items-center justify-center">
+                <div className="w-1.5 h-1.5 rounded-full bg-amber-300" />
+              </div>
+              <span className="text-[10px] font-mono font-bold text-amber-300 bg-slate-950/90 px-1 rounded mt-0.5 border border-amber-500/40 whitespace-nowrap">
+                Chin Anchor
+              </span>
             </div>
-            <span className="text-[10px] font-mono font-bold text-amber-300 bg-slate-950/90 px-1 rounded mt-0.5 border border-amber-500/40">
-              Chin Anchor
-            </span>
           </div>
         </div>
 
@@ -1216,16 +1242,20 @@ export const CartoonModeView: React.FC<CartoonModeViewProps> = ({ onBackToMain }
                       <div className="flex justify-between text-xs text-slate-400">
                         <span>Head Scale</span>
                         <span className="font-mono text-slate-200">
-                          {Math.round(headTransform.scale * 100)}%
+                          {Math.round((individualHeadAlignments[activeTemplate.id]?.scaleMultiplier ?? 1.0) * 100)}%
                         </span>
                       </div>
                       <input
                         type="range"
-                        min="0.5"
-                        max="1.6"
-                        step="0.01"
-                        value={headTransform.scale}
-                        onChange={(e) => updateHeadTransform({ scale: Number(e.target.value) })}
+                        min={Math.min(50, Math.round((individualHeadAlignments[activeTemplate.id]?.scaleMultiplier ?? 1.0) * 100))}
+                        max={Math.max(160, Math.round((individualHeadAlignments[activeTemplate.id]?.scaleMultiplier ?? 1.0) * 100))}
+                        step="1"
+                        value={Math.round((individualHeadAlignments[activeTemplate.id]?.scaleMultiplier ?? 1.0) * 100)}
+                        onChange={(e) =>
+                          setIndividualHeadAlignment(activeTemplate.id, {
+                            scaleMultiplier: Number(e.target.value) / 100,
+                          })
+                        }
                         className="w-full accent-rose-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
                       />
                     </div>

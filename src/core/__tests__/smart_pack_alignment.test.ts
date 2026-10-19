@@ -3,6 +3,7 @@ import {
   getPhotographicChinCropAnchor,
   computeEffectiveHeadTransform,
   computeInitialHeadPlacement,
+  convertLegacyTransformToIndividualAlignment,
 } from '../cartoonCompositor';
 import { CARTOON_REACTIONS_PACK, HI_WAVING_TEMPLATE } from '../../cartoon/templates';
 import {
@@ -310,5 +311,115 @@ describe('V1.6 Smart Pack-Wide Head Alignment & Chin Anchoring', () => {
     expect(defaultGlobal.rotationDelta).toBe(0);
     expect(Object.keys(defaultIndividual)).toHaveLength(0);
     expect(defaultChin).toBeNull();
+  });
+
+  it('10. Converts legacy manual transform to IndividualHeadAlignment and reproduces bitwise appearance', () => {
+    for (const tpl of CARTOON_REACTIONS_PACK) {
+      const auto = computeInitialHeadPlacement(tpl, mockHead);
+      // Create a heavily customized legacy transform (scale, tilt, drag, hair layer)
+      const customLegacy: HeadTransform = {
+        centerX: auto.centerX + 35,
+        centerY: auto.centerY - 28,
+        scale: parseFloat((auto.scale * 1.25).toFixed(4)),
+        rotationDegrees: parseFloat((auto.rotationDegrees - 7.5).toFixed(2)),
+        hairBehindBody: !auto.hairBehindBody,
+        autoPlacement: auto,
+      };
+
+      const converted = convertLegacyTransformToIndividualAlignment(tpl, mockHead, customLegacy);
+      expect(converted.hairBehindBody).toBe(customLegacy.hairBehindBody);
+
+      // Evaluating with neutral global alignment must reproduce exact legacy values bitwise
+      const reproduced = computeEffectiveHeadTransform(
+        tpl,
+        mockHead,
+        auto,
+        { scaleMultiplier: 1.0, rotationDelta: 0, offsetX: 0, offsetY: 0 },
+        converted
+      );
+
+      expect(reproduced.scale).toBe(customLegacy.scale);
+      expect(reproduced.rotationDegrees).toBe(customLegacy.rotationDegrees);
+      expect(reproduced.centerX).toBe(customLegacy.centerX);
+      expect(reproduced.centerY).toBe(customLegacy.centerY);
+      expect(reproduced.hairBehindBody).toBe(customLegacy.hairBehindBody);
+    }
+  });
+
+  it('11. Global adjustments compound on top of legacy manual placements and restore without drift', () => {
+    const tpl = HI_WAVING_TEMPLATE;
+    const auto = computeInitialHeadPlacement(tpl, mockHead);
+    const legacyTransform: HeadTransform = {
+      centerX: auto.centerX - 15,
+      centerY: auto.centerY + 20,
+      scale: 1.2,
+      rotationDegrees: 5,
+      hairBehindBody: false,
+      autoPlacement: auto,
+    };
+
+    const indiv = convertLegacyTransformToIndividualAlignment(tpl, mockHead, legacyTransform);
+
+    // Compound global adjustments on top
+    const gAlign: GlobalHeadAlignment = {
+      scaleMultiplier: 1.1,
+      rotationDelta: 4,
+      offsetX: 0.05,
+      offsetY: -0.02,
+    };
+
+    const compounded = computeEffectiveHeadTransform(tpl, mockHead, auto, gAlign, indiv);
+    expect(compounded.scale).toBe(parseFloat((legacyTransform.scale * 1.1).toFixed(4)));
+    expect(compounded.rotationDegrees).toBe(parseFloat((legacyTransform.rotationDegrees + 4).toFixed(2)));
+    expect(compounded.hairBehindBody).toBe(false);
+
+    // Reset global alignment back to neutral
+    const neutralGlobal: GlobalHeadAlignment = { scaleMultiplier: 1.0, rotationDelta: 0, offsetX: 0, offsetY: 0 };
+    const restored = computeEffectiveHeadTransform(tpl, mockHead, auto, neutralGlobal, indiv);
+
+    expect(restored.scale).toBe(legacyTransform.scale);
+    expect(restored.rotationDegrees).toBe(legacyTransform.rotationDegrees);
+    expect(restored.centerX).toBe(legacyTransform.centerX);
+    expect(restored.centerY).toBe(legacyTransform.centerY);
+    expect(restored.hairBehindBody).toBe(legacyTransform.hairBehindBody);
+  });
+
+  it('12. Chin calibration coordinate mapping calculates exact image coordinates on portrait and landscape crops', () => {
+    function mapClientCoordsToImage(
+      clientX: number,
+      clientY: number,
+      rect: { left: number; top: number; width: number; height: number },
+      imageW: number,
+      imageH: number
+    ) {
+      const relX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      const relY = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+      return {
+        x: Math.round(relX * imageW),
+        y: Math.round(relY * imageH),
+      };
+    }
+
+    // Portrait crop: 300w x 500h inside a 400x400 container
+    // With aspect ratio matching image, rendered canvas is 240w x 400h
+    const portraitRect = { left: 80, top: 0, width: 240, height: 400 };
+    const pCenter = mapClientCoordsToImage(80 + 120, 200, portraitRect, 300, 500);
+    expect(pCenter.x).toBe(150);
+    expect(pCenter.y).toBe(250);
+
+    const pChinTip = mapClientCoordsToImage(80 + 120, 400 * 0.85, portraitRect, 300, 500);
+    expect(pChinTip.x).toBe(150);
+    expect(pChinTip.y).toBe(425); // 500 * 0.85 = 425
+
+    // Landscape crop: 500w x 300h inside a 400x400 container
+    // Rendered canvas is 400w x 240h
+    const landscapeRect = { left: 0, top: 80, width: 400, height: 240 };
+    const lCenter = mapClientCoordsToImage(200, 80 + 120, landscapeRect, 500, 300);
+    expect(lCenter.x).toBe(250);
+    expect(lCenter.y).toBe(150);
+
+    const lChinTip = mapClientCoordsToImage(200, 80 + 240 * 0.85, landscapeRect, 500, 300);
+    expect(lChinTip.x).toBe(250);
+    expect(lChinTip.y).toBe(255); // 300 * 0.85 = 255
   });
 });
