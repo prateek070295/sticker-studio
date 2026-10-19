@@ -17,6 +17,7 @@ export interface TrimapOptions {
   faceBounds?: BoundingBox;
   manualEraseMask?: Uint8Array; // Hard background constraints
   manualRestoreMask?: Uint8Array; // Approved foreground constraints
+  manualDelta?: Int8Array | null; // -1 = erased, 1 = restored
 }
 
 export interface MattingOptions {
@@ -30,6 +31,8 @@ export interface MattingOptions {
   radius?: number; // guided filter radius (default 6)
   eps?: number; // guided filter regularization (default 1e-4)
   faceBounds?: BoundingBox;
+  primaryRegionBox?: BoundingBox;
+  manualDelta?: Int8Array | null;
 }
 
 export interface MattingResult {
@@ -101,6 +104,18 @@ export function generateTrimap(
 
     for (let x = 0; x < width; x++) {
       const idx = rowOffset + x;
+
+      // Authoritative manual erase constraint: strictly hard background
+      if (options.manualDelta && options.manualDelta[idx] === -1) {
+        trimap[idx] = 0;
+        continue;
+      }
+      // Authoritative manual restore constraint: strictly hard foreground
+      if (options.manualDelta && options.manualDelta[idx] === 1) {
+        trimap[idx] = 255;
+        continue;
+      }
+
       const dIn = distIn[idx];
       const dOut = distOut[idx];
 
@@ -119,6 +134,14 @@ export function generateTrimap(
     const erase = options.manualEraseMask;
     for (let i = 0; i < size; i++) {
       if (erase[i] > 0) trimap[i] = 0; // Hard background
+    }
+  }
+
+  if (options.manualDelta) {
+    const delta = options.manualDelta;
+    for (let i = 0; i < size; i++) {
+      if (delta[i] === -1) trimap[i] = 0;
+      else if (delta[i] === 1) trimap[i] = 255;
     }
   }
 
@@ -316,6 +339,15 @@ export function refineContinuousConfidence(
  * - trimap === 0   => alpha === 0 (zero background leakage)
  * - trimap === 128 => alpha in [0, 255] solved from local linear model
  */
+/**
+ * Guided Color Covariance Alpha Matting with genuine ROI-bounded execution.
+ * Uses 3D RGB color guidance to resolve subpixel alpha on hair and complex silhouettes.
+ *
+ * Enforces hard geometric constraints:
+ * - trimap === 255 => alpha === 255 (pristine solid foreground)
+ * - trimap === 0   => alpha === 0 (strict zero background leakage)
+ * - trimap === 128 => alpha in [0, 255] solved via local linear color model
+ */
 export function solveGuidedAlphaMatte(
   rgb: Uint8Array | Uint8ClampedArray,
   coarseAlpha: Uint8Array,
@@ -323,54 +355,113 @@ export function solveGuidedAlphaMatte(
   width: number,
   height: number,
   radius: number = 6,
-  eps: number = 1e-4
+  eps: number = 1e-4,
+  confidenceMap?: Float32Array
 ): Uint8Array {
   const size = width * height;
   const outAlpha = new Uint8Array(size);
 
-  // Normalize inputs to [0, 1] Float32Array
-  const I_r = new Float32Array(size);
-  const I_g = new Float32Array(size);
-  const I_b = new Float32Array(size);
-  const p = new Float32Array(size);
+  let minX = width;
+  let maxX = -1;
+  let minY = height;
+  let maxY = -1;
+  let unknownCount = 0;
 
-  const stride = rgb.length >= size * 4 ? 4 : 3;
-
-  for (let i = 0; i < size; i++) {
-    const sIdx = i * stride;
-    I_r[i] = rgb[sIdx] / 255.0;
-    I_g[i] = rgb[sIdx + 1] / 255.0;
-    I_b[i] = rgb[sIdx + 2] / 255.0;
-
-    if (trimap[i] === 255) {
-      p[i] = 1.0;
-    } else if (trimap[i] === 0) {
-      p[i] = 0.0;
-    } else {
-      p[i] = coarseAlpha[i] / 255.0;
+  // Initialize hard constraints and determine unknown band bounds
+  for (let y = 0; y < height; y++) {
+    const rowOffset = y * width;
+    for (let x = 0; x < width; x++) {
+      const idx = rowOffset + x;
+      const t = trimap[idx];
+      if (t === 255) {
+        outAlpha[idx] = 255;
+      } else if (t === 0) {
+        outAlpha[idx] = 0;
+      } else {
+        unknownCount++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
     }
+  }
+
+  // If no unknown band exists, return hard constrained mask directly
+  if (unknownCount === 0 || maxX < minX || maxY < minY) {
+    return outAlpha;
   }
 
   const r = Math.max(1, Math.round(radius));
 
-  // Compute means of guidance image and target
-  const mean_r = boxFilter(I_r, width, height, r);
-  const mean_g = boxFilter(I_g, width, height, r);
-  const mean_b = boxFilter(I_b, width, height, r);
-  const mean_p = boxFilter(p, width, height, r);
+  // Determine ROI bounding box with margin for box filter window context
+  const margin = r * 2 + 2;
+  const roiX = Math.max(0, minX - margin);
+  const roiY = Math.max(0, minY - margin);
+  const roiR = Math.min(width, maxX + margin + 1);
+  const roiB = Math.min(height, maxY + margin + 1);
+  const roiW = roiR - roiX;
+  const roiH = roiB - roiY;
+  const roiSize = roiW * roiH;
 
-  const I_rr = new Float32Array(size);
-  const I_rg = new Float32Array(size);
-  const I_rb = new Float32Array(size);
-  const I_gg = new Float32Array(size);
-  const I_gb = new Float32Array(size);
-  const I_bb = new Float32Array(size);
+  // Sub-window guidance and prior buffers
+  const I_r = new Float32Array(roiSize);
+  const I_g = new Float32Array(roiSize);
+  const I_b = new Float32Array(roiSize);
+  const p = new Float32Array(roiSize);
 
-  const I_rp = new Float32Array(size);
-  const I_gp = new Float32Array(size);
-  const I_bp = new Float32Array(size);
+  const stride = rgb.length >= size * 4 ? 4 : 3;
 
-  for (let i = 0; i < size; i++) {
+  for (let ry = 0; ry < roiH; ry++) {
+    const gy = roiY + ry;
+    const gRow = gy * width;
+    const rRow = ry * roiW;
+    for (let rx = 0; rx < roiW; rx++) {
+      const gx = roiX + rx;
+      const gIdx = gRow + gx;
+      const rIdx = rRow + rx;
+
+      const sIdx = gIdx * stride;
+      I_r[rIdx] = rgb[sIdx] / 255.0;
+      I_g[rIdx] = rgb[sIdx + 1] / 255.0;
+      I_b[rIdx] = rgb[sIdx + 2] / 255.0;
+
+      const t = trimap[gIdx];
+      if (t === 255) {
+        p[rIdx] = 1.0;
+      } else if (t === 0) {
+        p[rIdx] = 0.0;
+      } else {
+        // Unknown band prior: use model continuous confidence if available,
+        // or properly normalized foreground indicator (not crushed by 1/255)
+        if (confidenceMap && confidenceMap.length === size) {
+          p[rIdx] = Math.max(0.0, Math.min(1.0, confidenceMap[gIdx]));
+        } else {
+          const val = coarseAlpha[gIdx];
+          p[rIdx] = val > 1 ? val / 255.0 : (val === 1 ? 1.0 : 0.0);
+        }
+      }
+    }
+  }
+
+  // Compute means of guidance image and target on ROI
+  const mean_r = boxFilter(I_r, roiW, roiH, r);
+  const mean_g = boxFilter(I_g, roiW, roiH, r);
+  const mean_b = boxFilter(I_b, roiW, roiH, r);
+  const mean_p = boxFilter(p, roiW, roiH, r);
+
+  const I_rr = new Float32Array(roiSize);
+  const I_rg = new Float32Array(roiSize);
+  const I_rb = new Float32Array(roiSize);
+  const I_gg = new Float32Array(roiSize);
+  const I_gb = new Float32Array(roiSize);
+  const I_bb = new Float32Array(roiSize);
+
+  const I_rp = new Float32Array(roiSize);
+  const I_gp = new Float32Array(roiSize);
+  const I_bp = new Float32Array(roiSize);
+
+  for (let i = 0; i < roiSize; i++) {
     const rVal = I_r[i];
     const gVal = I_g[i];
     const bVal = I_b[i];
@@ -388,91 +479,98 @@ export function solveGuidedAlphaMatte(
     I_bp[i] = bVal * pVal;
   }
 
-  const mean_rr = boxFilter(I_rr, width, height, r);
-  const mean_rg = boxFilter(I_rg, width, height, r);
-  const mean_rb = boxFilter(I_rb, width, height, r);
-  const mean_gg = boxFilter(I_gg, width, height, r);
-  const mean_gb = boxFilter(I_gb, width, height, r);
-  const mean_bb = boxFilter(I_bb, width, height, r);
+  const mean_rr = boxFilter(I_rr, roiW, roiH, r);
+  const mean_rg = boxFilter(I_rg, roiW, roiH, r);
+  const mean_rb = boxFilter(I_rb, roiW, roiH, r);
+  const mean_gg = boxFilter(I_gg, roiW, roiH, r);
+  const mean_gb = boxFilter(I_gb, roiW, roiH, r);
+  const mean_bb = boxFilter(I_bb, roiW, roiH, r);
 
-  const mean_rp = boxFilter(I_rp, width, height, r);
-  const mean_gp = boxFilter(I_gp, width, height, r);
-  const mean_bp = boxFilter(I_bp, width, height, r);
+  const mean_rp = boxFilter(I_rp, roiW, roiH, r);
+  const mean_gp = boxFilter(I_gp, roiW, roiH, r);
+  const mean_bp = boxFilter(I_bp, roiW, roiH, r);
 
-  const a_r = new Float32Array(size);
-  const a_g = new Float32Array(size);
-  const a_b = new Float32Array(size);
-  const b = new Float32Array(size);
+  const a_r = new Float32Array(roiSize);
+  const a_g = new Float32Array(roiSize);
+  const a_b = new Float32Array(roiSize);
+  const b = new Float32Array(roiSize);
 
-  // Invert 3x3 covariance matrix (Sigma + eps * I) at each pixel
-  for (let i = 0; i < size; i++) {
-    if (trimap[i] === 0 || trimap[i] === 255) {
-      continue;
+  // Invert 3x3 covariance matrix (Sigma + eps * I) at each pixel in ROI
+  for (let ry = 0; ry < roiH; ry++) {
+    const gy = roiY + ry;
+    const gRow = gy * width;
+    const rRow = ry * roiW;
+    for (let rx = 0; rx < roiW; rx++) {
+      const gIdx = gRow + roiX + rx;
+      const rIdx = rRow + rx;
+
+      const mr = mean_r[rIdx];
+      const mg = mean_g[rIdx];
+      const mb = mean_b[rIdx];
+      const mp = mean_p[rIdx];
+
+      const cRR = mean_rr[rIdx] - mr * mr + eps;
+      const cRG = mean_rg[rIdx] - mr * mg;
+      const cRB = mean_rb[rIdx] - mr * mb;
+      const cGG = mean_gg[rIdx] - mg * mg + eps;
+      const cGB = mean_gb[rIdx] - mg * mb;
+      const cBB = mean_bb[rIdx] - mb * mb + eps;
+
+      const cov_rp = mean_rp[rIdx] - mr * mp;
+      const cov_gp = mean_gp[rIdx] - mg * mp;
+      const cov_bp = mean_bp[rIdx] - mb * mp;
+
+      // 3x3 Determinant
+      const inv00 = cGG * cBB - cGB * cGB;
+      const inv01 = cRB * cGB - cRG * cBB;
+      const inv02 = cRG * cGB - cRB * cGG;
+
+      const det = cRR * inv00 + cRG * inv01 + cRB * inv02;
+
+      if (Math.abs(det) < 1e-12) {
+        b[rIdx] = mp;
+        continue;
+      }
+
+      const invDet = 1.0 / det;
+
+      const inv10 = inv01;
+      const inv11 = cRR * cBB - cRB * cRB;
+      const inv12 = cRB * cRG - cRR * cGB;
+
+      const inv20 = inv02;
+      const inv21 = inv12;
+      const inv22 = cRR * cGG - cRG * cRG;
+
+      const ar = (inv00 * cov_rp + inv10 * cov_gp + inv20 * cov_bp) * invDet;
+      const ag = (inv01 * cov_rp + inv11 * cov_gp + inv21 * cov_bp) * invDet;
+      const ab = (inv02 * cov_rp + inv12 * cov_gp + inv22 * cov_bp) * invDet;
+
+      a_r[rIdx] = ar;
+      a_g[rIdx] = ag;
+      a_b[rIdx] = ab;
+      b[rIdx] = mp - ar * mr - ag * mg - ab * mb;
     }
-
-    const mr = mean_r[i];
-    const mg = mean_g[i];
-    const mb = mean_b[i];
-    const mp = mean_p[i];
-
-    const cRR = mean_rr[i] - mr * mr + eps;
-    const cRG = mean_rg[i] - mr * mg;
-    const cRB = mean_rb[i] - mr * mb;
-    const cGG = mean_gg[i] - mg * mg + eps;
-    const cGB = mean_gb[i] - mg * mb;
-    const cBB = mean_bb[i] - mb * mb + eps;
-
-    const cov_rp = mean_rp[i] - mr * mp;
-    const cov_gp = mean_gp[i] - mg * mp;
-    const cov_bp = mean_bp[i] - mb * mp;
-
-    // 3x3 Determinant
-    const inv00 = cGG * cBB - cGB * cGB;
-    const inv01 = cRB * cGB - cRG * cBB;
-    const inv02 = cRG * cGB - cRB * cGG;
-
-    const det = cRR * inv00 + cRG * inv01 + cRB * inv02;
-
-    if (Math.abs(det) < 1e-12) {
-      b[i] = mp;
-      continue;
-    }
-
-    const invDet = 1.0 / det;
-
-    const inv10 = inv01;
-    const inv11 = cRR * cBB - cRB * cRB;
-    const inv12 = cRB * cRG - cRR * cGB;
-
-    const inv20 = inv02;
-    const inv21 = inv12;
-    const inv22 = cRR * cGG - cRG * cRG;
-
-    const ar = (inv00 * cov_rp + inv10 * cov_gp + inv20 * cov_bp) * invDet;
-    const ag = (inv01 * cov_rp + inv11 * cov_gp + inv21 * cov_gp) * invDet;
-    const ab = (inv02 * cov_rp + inv12 * cov_gp + inv22 * cov_bp) * invDet;
-
-    a_r[i] = ar;
-    a_g[i] = ag;
-    a_b[i] = ab;
-    b[i] = mp - ar * mr - ag * mg - ab * mb;
   }
 
-  const mean_ar = boxFilter(a_r, width, height, r);
-  const mean_ag = boxFilter(a_g, width, height, r);
-  const mean_ab = boxFilter(a_b, width, height, r);
-  const mean_b_val = boxFilter(b, width, height, r);
+  const mean_ar = boxFilter(a_r, roiW, roiH, r);
+  const mean_ag = boxFilter(a_g, roiW, roiH, r);
+  const mean_ab = boxFilter(a_b, roiW, roiH, r);
+  const mean_b_val = boxFilter(b, roiW, roiH, r);
 
-  for (let i = 0; i < size; i++) {
-    const t = trimap[i];
-    if (t === 255) {
-      outAlpha[i] = 255;
-    } else if (t === 0) {
-      outAlpha[i] = 0;
-    } else {
-      const q = mean_ar[i] * I_r[i] + mean_ag[i] * I_g[i] + mean_ab[i] * I_b[i] + mean_b_val[i];
-      const clamped = Math.max(0.0, Math.min(1.0, q));
-      outAlpha[i] = Math.round(clamped * 255.0);
+  // Write back refined alpha strictly to unknown band pixels
+  for (let ry = 0; ry < roiH; ry++) {
+    const gy = roiY + ry;
+    const gRow = gy * width;
+    const rRow = ry * roiW;
+    for (let rx = 0; rx < roiW; rx++) {
+      const gIdx = gRow + roiX + rx;
+      const rIdx = rRow + rx;
+      if (trimap[gIdx] === 128) {
+        const q = mean_ar[rIdx] * I_r[rIdx] + mean_ag[rIdx] * I_g[rIdx] + mean_ab[rIdx] * I_b[rIdx] + mean_b_val[rIdx];
+        const clamped = Math.max(0.0, Math.min(1.0, q));
+        outAlpha[gIdx] = Math.round(clamped * 255.0);
+      }
     }
   }
 
@@ -660,6 +758,7 @@ export function refinePhotoAlphaMatte(
   const trimap = generateTrimap(coarseMask, width, height, {
     hairDetail: options.hairDetail ?? 5,
     faceBounds: options.faceBounds,
+    manualDelta: options.manualDelta,
   });
 
   const roi = computeUnknownBandRoi(trimap, width, height, 12);
@@ -673,10 +772,12 @@ export function refinePhotoAlphaMatte(
     width,
     height,
     guidedRadius,
-    guidedEps
+    guidedEps,
+    options.confidenceMap
   );
 
-  const shouldDecontaminate = options.decontaminateEdge ?? true;
+  // Decontamination is enabled by default ONLY in 'best' mode (or if explicitly requested)
+  const shouldDecontaminate = options.decontaminateEdge ?? (qualityMode === 'best');
   let decontaminatedRgba: Uint8ClampedArray | undefined;
 
   if (shouldDecontaminate) {

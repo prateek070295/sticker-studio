@@ -244,76 +244,72 @@ async function createCompoundWomanFlowerPortrait(): Promise<{
 }
 
 /**
- * Simulates MediaPipe coarse segmentation prior and continuous confidence map.
+ * Loads real MediaPipe coarse segmentation prior and continuous confidence map from disk,
+ * extracted via real MediaPipe vision tasks in headless browser.
  */
-function generateMediaPipePrior(
+function loadMediaPipePrior(
+  fixtureName: string,
   rgba: Uint8ClampedArray,
   width: number,
   height: number,
   accessoryBox?: BoundingBox
 ): { coarseMask: Uint8Array; confidenceMap: Float32Array; coreBox: BoundingBox } {
   const size = width * height;
-  const coarseMask = new Uint8Array(size);
-  const confidenceMap = new Float32Array(size);
+  const priorDir = path.resolve('docs/v1.7_matting_investigation/real_priors');
+  const baseName = fixtureName === 'compound_woman_red_flower' ? 'woman_portrait' : fixtureName;
+  const maskPath = path.join(priorDir, `${baseName}_mask.raw`);
+  const confPath = path.join(priorDir, `${baseName}_conf.raw`);
 
-  // Subject is centered in portrait: analyze luminance & spatial distance from center
-  const cx = width * 0.5;
-  const cy = height * 0.48;
-  const rx = width * 0.36;
-  const ry = height * 0.44;
+  let coarseMask = new Uint8Array(size);
+  let confidenceMap = new Float32Array(size);
 
-  const coreBox: BoundingBox = {
-    x: Math.round(width * 0.16),
-    y: Math.round(height * 0.06),
-    width: Math.round(width * 0.68),
-    height: Math.round(height * 0.88),
-  };
+  if (fs.existsSync(maskPath) && fs.existsSync(confPath)) {
+    const rawMask = fs.readFileSync(maskPath);
+    const rawConf = fs.readFileSync(confPath);
+    if (rawMask.byteLength === size) {
+      coarseMask.set(rawMask);
+    }
+    if (rawConf.byteLength === size * 4) {
+      confidenceMap = new Float32Array(rawConf.buffer, rawConf.byteOffset, size);
+    }
+  }
 
-  for (let y = 0; y < height; y++) {
-    const rowOffset = y * width;
-    for (let x = 0; x < width; x++) {
-      const idx = rowOffset + x;
-      const off = idx * 4;
-
-      const r = rgba[off];
-      const g = rgba[off + 1];
-      const b = rgba[off + 2];
-      const lum = (0.299 * r + 0.587 * g + 0.114 * b);
-
-      // Distance from center ellipse
-      const normX = (x - cx) / rx;
-      const normY = (y - cy) / ry;
-      const dEllipse = normX * normX + normY * normY;
-
-      let prob = 0;
-      if (dEllipse <= 1.0) {
-        const falloff = 1.0 - dEllipse;
-        prob = 0.5 + 0.5 * Math.sqrt(falloff);
-      } else if (dEllipse < 1.3) {
-        prob = 0.5 * (1.3 - dEllipse) / 0.3;
-      }
-
-      // If accessory exists, give it high confidence in accessory region
-      if (accessoryBox) {
-        if (
-          x >= accessoryBox.x &&
-          x < accessoryBox.x + accessoryBox.width &&
-          y >= accessoryBox.y &&
-          y < accessoryBox.y + accessoryBox.height
-        ) {
-          // Vibrant red check
-          if (r > 150 && g < 100 && b < 100) {
-            prob = Math.max(prob, 0.88);
-          }
+  // If accessory exists, add accessory pixels to coarse mask and confidence map
+  if (accessoryBox) {
+    for (let y = accessoryBox.y; y < accessoryBox.y + accessoryBox.height; y++) {
+      for (let x = accessoryBox.x; x < accessoryBox.x + accessoryBox.width; x++) {
+        const idx = y * width + x;
+        const off = idx * 4;
+        const r = rgba[off];
+        const g = rgba[off + 1];
+        const b = rgba[off + 2];
+        if (r > 150 && g < 100 && b < 100) {
+          coarseMask[idx] = 1;
+          confidenceMap[idx] = 0.95;
         }
-      }
-
-      confidenceMap[idx] = Math.max(0.0, Math.min(1.0, prob));
-      if (prob >= 0.48) {
-        coarseMask[idx] = 1;
       }
     }
   }
+
+  // Calculate subject core box from mask
+  let minX = width, maxX = 0, minY = height, maxY = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (coarseMask[y * width + x] > 0) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  const coreBox: BoundingBox = {
+    x: minX,
+    y: minY,
+    width: Math.max(1, maxX - minX + 1),
+    height: Math.max(1, maxY - minY + 1),
+  };
 
   return { coarseMask, confidenceMap, coreBox };
 }
@@ -422,8 +418,8 @@ async function runMattingBenchmark() {
     const loaded = await fixture.load();
     const { imageBuffer, rgba, width, height, cropHair, cropDiagonal, cropAccessory } = loaded;
 
-    // Build prior
-    const { coarseMask, confidenceMap, coreBox } = generateMediaPipePrior(rgba, width, height, cropAccessory);
+    // Load real MediaPipe prior
+    const { coarseMask, confidenceMap, coreBox } = loadMediaPipePrior(fixture.name, rgba, width, height, cropAccessory);
 
     // Merge accessories
     const merged = mergeAttachedAccessories(coarseMask, width, height, coreBox, {

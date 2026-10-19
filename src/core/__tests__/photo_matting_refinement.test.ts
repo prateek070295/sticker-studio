@@ -289,10 +289,10 @@ describe('Sticker Studio V1.7 — Photo Matting & Edge Refinement Core', () => {
       headZoneRatio: 0.65,
     });
 
-    // Hair flower is merged and preserved
+    // Hair flower is merged and preserved directly without artificial bridge lines
     expect(merged.attachedCount).toBe(1);
     expect(merged.mask[18 * W + 15]).toBe(1); // flower pixel preserved
-    expect(merged.mask[16 * W + 19]).toBe(1); // bridge pixel connected to head
+    expect(merged.mask[16 * W + 19]).toBe(0); // no artificial bridge lines drawn across gap
 
     // Disconnected background object is NOT merged
     expect(merged.mask[6 * W + 6]).toBe(0);
@@ -350,5 +350,152 @@ describe('Sticker Studio V1.7 — Photo Matting & Edge Refinement Core', () => {
     // Verify white die-cut backing is wide enough to enclose all visible artwork
     expect(composed.whiteBackedWidth).toBeGreaterThanOrEqual(composed.artworkOnlyWidth);
     expect(composed.whiteBackedHeight).toBeGreaterThanOrEqual(composed.artworkOnlyHeight);
+  });
+
+  it('8. Enforces hard manualDelta constraints (erased pixels strictly clamped to 0, no trimap dilation into erased zones)', () => {
+    const W = 40;
+    const H = 40;
+    const sourceRgba = new Uint8ClampedArray(W * H * 4);
+    const mask = new Uint8Array(W * H);
+    const manualDelta = new Int8Array(W * H);
+
+    // Initial subject: [10..30, 10..30]
+    for (let y = 10; y < 30; y++) {
+      for (let x = 10; x < 30; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    // Erase a 4px band on the right edge [26..29, 10..30]
+    for (let y = 10; y < 30; y++) {
+      for (let x = 26; x < 30; x++) {
+        manualDelta[y * W + x] = -1;
+      }
+    }
+
+    for (let i = 0; i < W * H * 4; i += 4) {
+      sourceRgba[i] = 180;
+      sourceRgba[i + 1] = 140;
+      sourceRgba[i + 2] = 100;
+      sourceRgba[i + 3] = 255;
+    }
+
+    const matting = refinePhotoAlphaMatte(
+      sourceRgba,
+      mask,
+      W,
+      H,
+      {
+        qualityMode: 'better',
+        manualDelta,
+      }
+    );
+
+    // All erased pixels MUST have trimap === 0 and alpha === 0
+    for (let y = 10; y < 30; y++) {
+      for (let x = 26; x < 30; x++) {
+        const idx = y * W + x;
+        expect(matting.trimap[idx]).toBe(0);
+        expect(matting.alpha[idx]).toBe(0);
+      }
+    }
+  });
+
+  it('9. Caches intermediate matte when only borderThickness or padding changes', () => {
+    const W = 40;
+    const H = 40;
+    const sourceRgba = new Uint8ClampedArray(W * H * 4);
+    const mask = new Uint8Array(W * H);
+
+    for (let y = 10; y < 30; y++) {
+      for (let x = 10; x < 30; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    for (let i = 0; i < W * H * 4; i += 4) {
+      sourceRgba[i] = 120;
+      sourceRgba[i + 1] = 140;
+      sourceRgba[i + 2] = 160;
+      sourceRgba[i + 3] = 255;
+    }
+
+    const options = { qualityMode: 'better' as const };
+
+    // Initial compose
+    const comp1 = composePhotoCutout(mask, sourceRgba, W, H, 10, 20, 0, 0, 0, options);
+
+    // Second compose with different borderThickness only
+    const comp2 = composePhotoCutout(mask, sourceRgba, W, H, 25, 20, 0, 0, 0, options);
+
+    // Artwork only dimensions and RGBA must be bitwise identical
+    expect(comp2.artworkOnlyWidth).toBe(comp1.artworkOnlyWidth);
+    expect(comp2.artworkOnlyHeight).toBe(comp1.artworkOnlyHeight);
+    expect(Array.from(comp2.artworkOnlyRgba)).toEqual(Array.from(comp1.artworkOnlyRgba));
+
+    // White backed width should expand due to larger borderThickness
+    expect(comp2.whiteBackedWidth).toBeGreaterThan(comp1.whiteBackedWidth);
+  });
+
+  it('10. Full production cutout call retains attached flower and rejects distant background island without bridges', () => {
+    const W = 80;
+    const H = 80;
+    const sourceRgba = new Uint8ClampedArray(W * H * 4);
+    const mask = new Uint8Array(W * H);
+
+    // Main person: [25..55, 20..70]
+    for (let y = 20; y < 70; y++) {
+      for (let x = 25; x < 55; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    // Attached flower accessory in hair zone: [16..22, 22..28]
+    for (let y = 22; y < 28; y++) {
+      for (let x = 16; x < 22; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    // Unrelated background island: [2..6, 2..6]
+    for (let y = 2; y < 6; y++) {
+      for (let x = 2; x < 6; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    for (let i = 0; i < W * H * 4; i += 4) {
+      sourceRgba[i] = 150;
+      sourceRgba[i + 1] = 120;
+      sourceRgba[i + 2] = 90;
+      sourceRgba[i + 3] = 255;
+    }
+
+    const primaryBox: BoundingBox = { x: 25, y: 20, width: 30, height: 50 };
+
+    const composed = composePhotoCutout(
+      mask,
+      sourceRgba,
+      W,
+      H,
+      15,
+      30,
+      0,
+      0,
+      0,
+      {
+        qualityMode: 'better',
+        accessoryMerge: true,
+        primaryRegionBox: primaryBox,
+      }
+    );
+
+    expect(composed.artworkOnlyWidth).toBeGreaterThan(0);
+    // Flower pixel (18, 24) should be included in output bounds
+    expect(composed.bounds.x).toBeLessThanOrEqual(16);
+
+    // Unrelated background island (x=2..6, y=2..6) should NOT expand output bounds to 2
+    expect(composed.bounds.x).toBeGreaterThan(6);
+    expect(composed.bounds.y).toBeGreaterThan(6);
   });
 });

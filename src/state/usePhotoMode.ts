@@ -174,7 +174,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
   const [bottomFinish, setBottomFinish] = useState<'flat' | 'rounded' | 'curved'>('flat');
   const [bottomCurveRadius, setBottomCurveRadiusState] = useState<number>(30);
   const [qualityMode, setQualityModeState] = useState<'fast' | 'better' | 'best'>('better');
-  const [decontaminateEdge, setDecontaminateEdgeState] = useState<boolean>(true);
+  const [decontaminateEdge, setDecontaminateEdgeState] = useState<boolean>(false);
   const [hairDetail, setHairDetailState] = useState<number>(5);
   const [accessoryMerge, setAccessoryMergeState] = useState<boolean>(true);
   const [previewBg, setPreviewBg] = useState<'checker' | 'dark' | 'light' | 'saturated' | 'white' | 'grey'>('checker');
@@ -224,16 +224,15 @@ export function usePhotoMode(): UsePhotoModeReturn {
       });
   }, [sourceImage]);
 
-  // Recompose sticker whenever mask, sourceImage, borderThickness, or finishing options change
-  useEffect(() => {
-    if (!sourceImage || !mask) {
-      setComposedResult(null);
-      return;
-    }
+  const primaryRegion = useMemo(() => {
+    return personRegions.find(r => r.id === selectedRegionId)
+      ?? personRegions.find(r => r.included)
+      ?? personRegions[0];
+  }, [personRegions, selectedRegionId]);
 
-    const W = sourceImage.width;
-    const H = sourceImage.height;
-    const finishedMask = applyPhotoFinishing(mask, W, H, {
+  const finishedMask = useMemo(() => {
+    if (!sourceImage || !mask) return null;
+    return applyPhotoFinishing(mask, sourceImage.width, sourceImage.height, {
       edgeTrim,
       bottomFinish,
       bottomCurveRadius,
@@ -241,10 +240,31 @@ export function usePhotoMode(): UsePhotoModeReturn {
       artworkEdgeSmoothness,
       artworkEdgeFeather,
     });
+  }, [
+    mask,
+    sourceImage,
+    edgeTrim,
+    bottomFinish,
+    bottomCurveRadius,
+    smoothOutline,
+    artworkEdgeSmoothness,
+    artworkEdgeFeather,
+  ]);
 
-    const confidenceMap = personRegions.length > 0
-      ? combinePersonConfidence(personRegions, W, H)
-      : undefined;
+  const confidenceMap = useMemo(() => {
+    if (!sourceImage || personRegions.length === 0) return undefined;
+    return combinePersonConfidence(personRegions, sourceImage.width, sourceImage.height);
+  }, [personRegions, sourceImage]);
+
+  // Recompose sticker whenever mask, sourceImage, borderThickness, or finishing options change
+  useEffect(() => {
+    if (!sourceImage || !finishedMask) {
+      setComposedResult(null);
+      return;
+    }
+
+    const W = sourceImage.width;
+    const H = sourceImage.height;
 
     const res = composePhotoCutout(
       finishedMask,
@@ -268,16 +288,15 @@ export function usePhotoMode(): UsePhotoModeReturn {
         hairDetail,
         accessoryMerge,
         confidenceMap,
+        primaryRegionBox: primaryRegion?.box,
+        manualDelta,
       }
     );
     setComposedResult(res);
   }, [
     sourceImage,
-    mask,
+    finishedMask,
     borderThickness,
-    edgeTrim,
-    bottomFinish,
-    bottomCurveRadius,
     smoothOutline,
     artworkEdgeSmoothness,
     artworkEdgeFeather,
@@ -285,7 +304,12 @@ export function usePhotoMode(): UsePhotoModeReturn {
     decontaminateEdge,
     hairDetail,
     accessoryMerge,
-    personRegions,
+    confidenceMap,
+    primaryRegion,
+    manualDelta,
+    edgeTrim,
+    bottomFinish,
+    bottomCurveRadius,
   ]);
 
   // Load photo file
@@ -941,8 +965,11 @@ export function usePhotoMode(): UsePhotoModeReturn {
       setArtworkEdgeFeatherState(loaded.metadata.photoSettings.artworkEdgeFeather ?? 0);
       setBottomFinish(loaded.metadata.photoSettings.bottomFinish ?? 'flat');
       setBottomCurveRadiusState(loaded.metadata.photoSettings.bottomCurveRadius ?? 30);
-      setQualityModeState(loaded.metadata.photoSettings.qualityMode ?? 'better');
-      setDecontaminateEdgeState(loaded.metadata.photoSettings.decontaminateEdge ?? true);
+      const qm = loaded.metadata.photoSettings.qualityMode ?? 'fast';
+      setQualityModeState(qm);
+      setDecontaminateEdgeState(
+        loaded.metadata.photoSettings.decontaminateEdge ?? (qm === 'best')
+      );
       setHairDetailState(loaded.metadata.photoSettings.hairDetail ?? 5);
       setAccessoryMergeState(loaded.metadata.photoSettings.accessoryMerge ?? true);
 
@@ -993,7 +1020,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setBottomFinish('flat');
     setBottomCurveRadiusState(30);
     setQualityModeState('better');
-    setDecontaminateEdgeState(true);
+    setDecontaminateEdgeState(false);
     setHairDetailState(5);
     setAccessoryMergeState(true);
     undoStackRef.current = [];
@@ -1003,6 +1030,11 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
   const setQualityMode = useCallback((mode: 'fast' | 'better' | 'best') => {
     setQualityModeState(mode);
+    if (mode === 'better') {
+      setDecontaminateEdgeState(false);
+    } else if (mode === 'best') {
+      setDecontaminateEdgeState(true);
+    }
   }, []);
 
   const setDecontaminateEdge = useCallback((val: boolean) => {

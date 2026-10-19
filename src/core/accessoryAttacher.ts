@@ -136,45 +136,71 @@ export function mergeAttachedAccessories(
     return { mask: new Uint8Array(rawMask), attachedCount: 0, accessoryBoxes: [] };
   }
 
-  // 2. Classify Primary Person Components (those overlapping coreBox)
+  // 2. Classify Primary Person Component
+  // Find the single dominant component with the maximum pixel count inside coreBox
   const cMinX = Math.max(0, coreBox.x);
   const cMaxX = Math.min(width - 1, coreBox.x + coreBox.width);
   const cMinY = Math.max(0, coreBox.y);
   const cMaxY = Math.min(height - 1, coreBox.y + coreBox.height);
 
-  let hasPrimary = false;
-  for (const comp of components) {
-    // Check overlap with coreBox
-    const overlapX = Math.max(0, Math.min(comp.maxX, cMaxX) - Math.max(comp.minX, cMinX));
-    const overlapY = Math.max(0, Math.min(comp.maxY, cMaxY) - Math.max(comp.minY, cMinY));
-    const overlapArea = overlapX * overlapY;
+  let primaryCompIdx = -1;
+  let maxCoreOverlapPixels = 0;
 
-    if (overlapArea > 0 || (comp.minX >= cMinX && comp.maxX <= cMaxX && comp.minY >= cMinY && comp.maxY <= cMaxY)) {
-      comp.isPrimary = true;
-      hasPrimary = true;
+  for (let i = 0; i < components.length; i++) {
+    const comp = components[i];
+    let overlapInCore = 0;
+    for (const idx of comp.pixels) {
+      const px = idx % width;
+      const py = Math.floor(idx / width);
+      if (px >= cMinX && px <= cMaxX && py >= cMinY && py <= cMaxY) {
+        overlapInCore++;
+      }
+    }
+
+    if (overlapInCore > maxCoreOverlapPixels) {
+      maxCoreOverlapPixels = overlapInCore;
+      primaryCompIdx = i;
     }
   }
 
-  // Fallback: if no component overlapped coreBox, the largest component is primary
-  if (!hasPrimary) {
+  // Fallback: if no component had pixels in coreBox, pick largest component overall
+  if (primaryCompIdx === -1) {
     let maxIdx = 0;
     for (let i = 1; i < components.length; i++) {
       if (components[i].pixelCount > components[maxIdx].pixelCount) {
         maxIdx = i;
       }
     }
-    components[maxIdx].isPrimary = true;
+    primaryCompIdx = maxIdx;
+  }
+
+  // Mark the dominant component (and any massive components > 35% of its size) as primary
+  const mainPixelCount = components[primaryCompIdx].pixelCount;
+  for (let i = 0; i < components.length; i++) {
+    const comp = components[i];
+    if (i === primaryCompIdx || comp.pixelCount > mainPixelCount * 0.45) {
+      comp.isPrimary = true;
+    }
   }
 
   // Build binary primary mask to calculate Euclidean distance to primary
   const primaryMask = new Uint8Array(size);
+  let pMinY = height;
+  let pMaxY = 0;
+
   for (const comp of components) {
     if (comp.isPrimary) {
       for (const idx of comp.pixels) {
         primaryMask[idx] = 1;
+        const py = Math.floor(idx / width);
+        if (py < pMinY) pMinY = py;
+        if (py > pMaxY) pMaxY = py;
       }
     }
   }
+
+  const primaryHeight = Math.max(20, pMaxY - pMinY + 1);
+  const effectiveHeadThreshold = pMinY + primaryHeight * headZoneRatio;
 
   const distToPrimary = computeEuclideanDistanceTransform(primaryMask, width, height);
 
@@ -188,27 +214,25 @@ export function mergeAttachedAccessories(
   for (const comp of components) {
     if (comp.isPrimary) continue;
 
-    // Filter by size
+    // Reject components that are too small or excessively large
     if (comp.pixelCount < minPixels || comp.pixelCount > maxPixels) continue;
 
-    // Check if in head/hair zone
-    const isHeadZone = comp.minY <= headYThreshold || comp.maxY <= headYThreshold;
+    // Check if in head/hair/temple/crown zone of primary person
+    const isHeadZone = comp.minY <= effectiveHeadThreshold || comp.maxY <= effectiveHeadThreshold;
     if (!isHeadZone) continue;
 
     // Find minimum distance of this component to primary mask
     let minDist = Infinity;
-    let closestCompIdx = -1;
-
     for (const idx of comp.pixels) {
       const d = distToPrimary[idx];
       if (d < minDist) {
         minDist = d;
-        closestCompIdx = idx;
       }
     }
     comp.minDistToPrimary = minDist;
 
     // If within attachment threshold, attach and merge!
+    // Reject unrelated background objects that are distant
     if (minDist <= maxDist) {
       attachedCount++;
       attachedBoxes.push({
@@ -218,44 +242,9 @@ export function mergeAttachedAccessories(
         height: comp.maxY - comp.minY + 1,
       });
 
-      // Add component pixels to result
+      // Add component pixels directly to result WITHOUT drawing artificial visible bridge lines
       for (const idx of comp.pixels) {
         outMask[idx] = 1;
-      }
-
-      // Fill a small bridge to guarantee topological connectivity
-      if (closestCompIdx >= 0 && minDist > 1.0) {
-        const startX = closestCompIdx % width;
-        const startY = Math.floor(closestCompIdx / width);
-
-        // Bresenham walk toward closest primary pixel
-        // Find nearest primary point within neighborhood
-        let bestTargetX = startX;
-        let bestTargetY = startY;
-        let bestTargetDist = Infinity;
-
-        const sRad = Math.ceil(minDist) + 2;
-        const sy0 = Math.max(0, startY - sRad);
-        const sy1 = Math.min(height - 1, startY + sRad);
-        const sx0 = Math.max(0, startX - sRad);
-        const sx1 = Math.min(width - 1, startX + sRad);
-
-        for (let py = sy0; py <= sy1; py++) {
-          const pRow = py * width;
-          for (let px = sx0; px <= sx1; px++) {
-            if (primaryMask[pRow + px] > 0) {
-              const dSq = (px - startX) * (px - startX) + (py - startY) * (py - startY);
-              if (dSq < bestTargetDist) {
-                bestTargetDist = dSq;
-                bestTargetX = px;
-                bestTargetY = py;
-              }
-            }
-          }
-        }
-
-        // Draw connecting bridge line
-        drawBridge(outMask, width, height, startX, startY, bestTargetX, bestTargetY);
       }
     }
   }

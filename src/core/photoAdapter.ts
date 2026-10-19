@@ -26,6 +26,8 @@ export interface PhotoFinishingOptions {
   accessoryMerge?: boolean;
   confidenceMap?: Float32Array;
   faceBounds?: BoundingBox;
+  primaryRegionBox?: BoundingBox;
+  manualDelta?: Int8Array | null;
 }
 
 export interface PhotoComposedResult {
@@ -40,6 +42,40 @@ export interface PhotoComposedResult {
   bounds: BoundingBox;
   trimap?: Uint8Array;
   mattingDurationMs?: number;
+}
+
+interface IntermediateMatteResult {
+  alphaMask: Uint8Array;
+  effectiveRgba: Uint8ClampedArray;
+  trimap?: Uint8Array;
+  mattingDurationMs?: number;
+  labelMap: Uint16Array;
+  bounds: BoundingBox;
+}
+
+interface PhotoMatteCacheEntry {
+  maskRef: Uint8Array;
+  maskChecksum: number;
+  sourceRgbaRef: Uint8ClampedArray;
+  width: number;
+  height: number;
+  smoothness: number;
+  feather: number;
+  qualityMode?: string;
+  candidateAlgo?: string;
+  hairDetail: number;
+  decontaminateEdge?: boolean;
+  accessoryMerge: boolean;
+  confidenceMapRef?: Float32Array;
+  manualDeltaRef?: Int8Array | null;
+  primaryBoxKey: string;
+  result: IntermediateMatteResult;
+}
+
+let lastMatteCache: PhotoMatteCacheEntry | null = null;
+
+export function clearPhotoMatteCache(): void {
+  lastMatteCache = null;
 }
 
 export function composePhotoCutout(
@@ -94,87 +130,153 @@ export function composePhotoCutout(
     height: maxY - minY + 1,
   };
 
-  // 2. Handle Attached Accessories (Hair flowers, clips, earrings)
-  let effectiveMask = mask;
-  if (finishingOptions?.accessoryMerge) {
-    const merged = mergeAttachedAccessories(mask, sourceWidth, sourceHeight, initialBounds);
-    if (merged.attachedCount > 0) {
-      effectiveMask = merged.mask;
-    }
-  }
-
-  // 3. Resolve Alpha Matte & Color Decontamination
-  const totalPixels = sourceWidth * sourceHeight;
-  let alphaMask: Uint8Array;
-  let effectiveRgba = sourceRgba;
-  let trimap: Uint8Array | undefined;
-  let mattingDurationMs: number | undefined;
+  const primaryBox = finishingOptions?.primaryRegionBox ?? finishingOptions?.faceBounds ?? initialBounds;
+  const primaryBoxKey = `${primaryBox.x},${primaryBox.y},${primaryBox.width},${primaryBox.height}`;
+  const maskChecksum = mask.length ^ mask[0] ^ mask[mask.length >> 1] ^ mask[mask.length - 1];
 
   const qualityMode = finishingOptions?.qualityMode;
   const candidateAlgo = finishingOptions?.candidateAlgorithm;
 
-  if (qualityMode === 'better' || qualityMode === 'best' || candidateAlgo === 'candidate-b' || candidateAlgo === 'candidate-c') {
-    const matting = refinePhotoAlphaMatte(
-      sourceRgba,
-      effectiveMask,
-      sourceWidth,
-      sourceHeight,
-      {
-        qualityMode,
-        candidateAlgorithm: candidateAlgo,
-        smoothness: artworkEdgeSmoothness,
-        feather: artworkEdgeFeather,
-        hairDetail: finishingOptions?.hairDetail ?? 5,
-        decontaminateEdge: finishingOptions?.decontaminateEdge ?? true,
-        confidenceMap: finishingOptions?.confidenceMap,
-        faceBounds: finishingOptions?.faceBounds,
-      }
-    );
-    alphaMask = matting.alpha;
-    trimap = matting.trimap;
-    mattingDurationMs = matting.mattingDurationMs;
-    if (matting.decontaminatedRgba) {
-      effectiveRgba = matting.decontaminatedRgba;
-    }
+  let intermediate: IntermediateMatteResult;
+
+  if (
+    lastMatteCache &&
+    lastMatteCache.maskRef === mask &&
+    lastMatteCache.maskChecksum === maskChecksum &&
+    lastMatteCache.sourceRgbaRef === sourceRgba &&
+    lastMatteCache.width === sourceWidth &&
+    lastMatteCache.height === sourceHeight &&
+    lastMatteCache.smoothness === artworkEdgeSmoothness &&
+    lastMatteCache.feather === artworkEdgeFeather &&
+    lastMatteCache.qualityMode === qualityMode &&
+    lastMatteCache.candidateAlgo === candidateAlgo &&
+    lastMatteCache.hairDetail === (finishingOptions?.hairDetail ?? 5) &&
+    lastMatteCache.decontaminateEdge === finishingOptions?.decontaminateEdge &&
+    lastMatteCache.accessoryMerge === (finishingOptions?.accessoryMerge ?? false) &&
+    lastMatteCache.confidenceMapRef === finishingOptions?.confidenceMap &&
+    lastMatteCache.manualDeltaRef === finishingOptions?.manualDelta &&
+    lastMatteCache.primaryBoxKey === primaryBoxKey
+  ) {
+    intermediate = lastMatteCache.result;
   } else {
-    alphaMask = refineArtworkAlpha(
-      effectiveMask,
-      sourceWidth,
-      sourceHeight,
-      artworkEdgeSmoothness,
-      artworkEdgeFeather
-    );
-  }
-
-  // 4. Build Authoritative Photo Support Envelope
-  // Pixels with legitimate recovered alpha (alpha > 0) must be included in labelMap
-  // so compositeSticker does not truncate fractional edge alpha outside the coarse mask.
-  const labelMap = new Uint16Array(totalPixels);
-  let finalMinX = sourceWidth;
-  let finalMaxX = -1;
-  let finalMinY = sourceHeight;
-  let finalMaxY = -1;
-
-  for (let y = 0; y < sourceHeight; y++) {
-    const rowOffset = y * sourceWidth;
-    for (let x = 0; x < sourceWidth; x++) {
-      const idx = rowOffset + x;
-      if (alphaMask[idx] > 0) {
-        labelMap[idx] = 1;
-        if (x < finalMinX) finalMinX = x;
-        if (x > finalMaxX) finalMaxX = x;
-        if (y < finalMinY) finalMinY = y;
-        if (y > finalMaxY) finalMaxY = y;
+    // 2. Handle Attached Accessories (Hair flowers, clips, earrings)
+    let effectiveMask = mask;
+    if (finishingOptions?.accessoryMerge) {
+      const merged = mergeAttachedAccessories(mask, sourceWidth, sourceHeight, primaryBox);
+      if (merged.attachedCount > 0) {
+        effectiveMask = merged.mask;
       }
     }
+
+    // 3. Resolve Alpha Matte & Color Decontamination
+    const totalPixels = sourceWidth * sourceHeight;
+    let alphaMask: Uint8Array;
+    let effectiveRgba = sourceRgba;
+    let trimap: Uint8Array | undefined;
+    let mattingDurationMs: number | undefined;
+
+    if (qualityMode === 'better' || qualityMode === 'best' || candidateAlgo === 'candidate-b' || candidateAlgo === 'candidate-c') {
+      const matting = refinePhotoAlphaMatte(
+        sourceRgba,
+        effectiveMask,
+        sourceWidth,
+        sourceHeight,
+        {
+          qualityMode,
+          candidateAlgorithm: candidateAlgo,
+          smoothness: artworkEdgeSmoothness,
+          feather: artworkEdgeFeather,
+          hairDetail: finishingOptions?.hairDetail ?? 5,
+          decontaminateEdge: finishingOptions?.decontaminateEdge,
+          confidenceMap: finishingOptions?.confidenceMap,
+          faceBounds: finishingOptions?.faceBounds,
+          primaryRegionBox: finishingOptions?.primaryRegionBox,
+          manualDelta: finishingOptions?.manualDelta,
+        }
+      );
+      alphaMask = matting.alpha;
+      trimap = matting.trimap;
+      mattingDurationMs = matting.mattingDurationMs;
+      if (matting.decontaminatedRgba) {
+        effectiveRgba = matting.decontaminatedRgba;
+      }
+    } else {
+      alphaMask = refineArtworkAlpha(
+        effectiveMask,
+        sourceWidth,
+        sourceHeight,
+        artworkEdgeSmoothness,
+        artworkEdgeFeather
+      );
+    }
+
+    // 4. Build Authoritative Photo Support Envelope
+    // Pixels with legitimate recovered alpha (alpha > 0) must be included in labelMap
+    // so compositeSticker does not truncate fractional edge alpha outside the coarse mask.
+    const labelMap = new Uint16Array(totalPixels);
+    let finalMinX = sourceWidth;
+    let finalMaxX = -1;
+    let finalMinY = sourceHeight;
+    let finalMaxY = -1;
+
+    for (let y = 0; y < sourceHeight; y++) {
+      const rowOffset = y * sourceWidth;
+      for (let x = 0; x < sourceWidth; x++) {
+        const idx = rowOffset + x;
+        if (alphaMask[idx] > 0) {
+          labelMap[idx] = 1;
+          if (x < finalMinX) finalMinX = x;
+          if (x > finalMaxX) finalMaxX = x;
+          if (y < finalMinY) finalMinY = y;
+          if (y > finalMaxY) finalMaxY = y;
+        }
+      }
+    }
+
+    const bounds: BoundingBox = (finalMinX <= finalMaxX && finalMinY <= finalMaxY)
+      ? {
+          x: finalMinX,
+          y: finalMinY,
+          width: finalMaxX - finalMinX + 1,
+          height: finalMaxY - finalMinY + 1,
+        }
+      : {
+          x: minX,
+          y: minY,
+          width: maxX - minX + 1,
+          height: maxY - minY + 1,
+        };
+
+    intermediate = {
+      alphaMask,
+      effectiveRgba,
+      trimap,
+      mattingDurationMs,
+      labelMap,
+      bounds,
+    };
+
+    lastMatteCache = {
+      maskRef: mask,
+      maskChecksum,
+      sourceRgbaRef: sourceRgba,
+      width: sourceWidth,
+      height: sourceHeight,
+      smoothness: artworkEdgeSmoothness,
+      feather: artworkEdgeFeather,
+      qualityMode,
+      candidateAlgo,
+      hairDetail: finishingOptions?.hairDetail ?? 5,
+      decontaminateEdge: finishingOptions?.decontaminateEdge,
+      accessoryMerge: finishingOptions?.accessoryMerge ?? false,
+      confidenceMapRef: finishingOptions?.confidenceMap,
+      manualDeltaRef: finishingOptions?.manualDelta,
+      primaryBoxKey,
+      result: intermediate,
+    };
   }
 
-  const bounds: BoundingBox = {
-    x: Math.min(minX, finalMinX < sourceWidth ? finalMinX : minX),
-    y: Math.min(minY, finalMinY < sourceHeight ? finalMinY : minY),
-    width: Math.max(maxX, finalMaxX) - Math.min(minX, finalMinX < sourceWidth ? finalMinX : minX) + 1,
-    height: Math.max(maxY, finalMaxY) - Math.min(minY, finalMinY < sourceHeight ? finalMinY : minY) + 1,
-  };
+  const { alphaMask, effectiveRgba, trimap, mattingDurationMs, labelMap, bounds } = intermediate;
 
   const compId = 'photo_cutout_comp';
   const groupId = 'photo_cutout_group';
