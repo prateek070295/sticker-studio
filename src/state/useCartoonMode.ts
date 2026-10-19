@@ -5,14 +5,18 @@ import {
   HeadTransform,
   CartoonProjectData,
 } from '../cartoon/types';
-import { HI_WAVING_TEMPLATE, ALL_CARTOON_TEMPLATES } from '../cartoon/templates/hiWaving';
+import {
+  HI_WAVING_TEMPLATE,
+  CARTOON_REACTIONS_PACK,
+  ALL_CARTOON_TEMPLATES,
+} from '../cartoon/templates';
 import { extractPhotographicHead } from '../core/cartoonHeadExtractor';
 import {
   computeInitialHeadPlacement,
   renderCartoonArtwork,
   generateCartoonStickerDieCut,
 } from '../core/cartoonCompositor';
-
+import { createZip, ZipEntry } from '../core/zip';
 import { MaskPatch, StrokePoint } from '../types';
 import { separateFrontAndRearHairCanvases } from '../core/cartoonHeadExtractor';
 import { applyBrushStroke } from '../core/maskPatch';
@@ -38,6 +42,54 @@ export function base64ToUint8Array(base64: string): Uint8Array {
   return bytes;
 }
 
+export function getPackStickerFilename(template: CartoonTemplateManifest, index: number): string {
+  const num = String(index + 1).padStart(2, '0');
+  const rawName = template.id === 'hi-waving-01' ? 'Hi' : template.name;
+  const cleanTitle = rawName
+    .replace(/[!?.()']/g, '')
+    .trim()
+    .split(/\s+/)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join('_');
+  return `${num}_${cleanTitle}.png`;
+}
+
+export function getCroppedCanvas(
+  srcCanvas: HTMLCanvasElement,
+  crop: { x: number; y: number; width: number; height: number }
+): HTMLCanvasElement {
+  const exportCanvas = document.createElement('canvas');
+  exportCanvas.width = Math.max(1, crop.width);
+  exportCanvas.height = Math.max(1, crop.height);
+  const eCtx = exportCanvas.getContext('2d');
+  if (eCtx) {
+    eCtx.drawImage(
+      srcCanvas,
+      crop.x,
+      crop.y,
+      crop.width,
+      crop.height,
+      0,
+      0,
+      crop.width,
+      crop.height
+    );
+  }
+  return exportCanvas;
+}
+
+export function canvasToPngUint8Array(canvas: HTMLCanvasElement): Uint8Array {
+  const dataUrl = canvas.toDataURL('image/png');
+  const base64 = dataUrl.split(',')[1];
+  return base64ToUint8Array(base64);
+}
+
+export interface PackStickerPreview {
+  artworkCanvas: HTMLCanvasElement;
+  stickerCanvas: HTMLCanvasElement;
+  tightCrop: { x: number; y: number; width: number; height: number };
+}
+
 export interface UseCartoonModeReturn {
   // State
   selfieDataUrl: string | null;
@@ -55,6 +107,14 @@ export interface UseCartoonModeReturn {
   tightCrop: { x: number; y: number; width: number; height: number } | null;
   error: string | null;
 
+  // V1.5 Reactions Pack State
+  viewMode: 'gallery' | 'detail';
+  templates: CartoonTemplateManifest[];
+  selectedTemplateIds: string[];
+  packPreviews: Record<string, PackStickerPreview>;
+  templateTransforms: Record<string, HeadTransform>;
+  isExportingZip: boolean;
+
   // Mask & Tool Controls
   toolMode: 'move' | 'erase' | 'restore';
   brushSize: number;
@@ -62,6 +122,11 @@ export interface UseCartoonModeReturn {
   canRedo: boolean;
 
   // Actions
+  setViewMode: (mode: 'gallery' | 'detail') => void;
+  selectTemplateForEdit: (templateId: string) => void;
+  toggleTemplateSelection: (id: string) => void;
+  selectAllTemplates: () => void;
+  deselectAllTemplates: () => void;
   setToolMode: (mode: 'move' | 'erase' | 'restore') => void;
   setBrushSize: (size: number) => void;
   undo: () => void;
@@ -82,6 +147,7 @@ export interface UseCartoonModeReturn {
   setPreviewBg: (bg: 'checker' | 'dark' | 'white' | 'print') => void;
   exportArtworkPng: () => void;
   exportStickerPng: () => void;
+  exportPackZip: () => Promise<void>;
   saveProjectJson: () => void;
   loadProjectJson: (jsonString: string) => Promise<void>;
 }
@@ -102,6 +168,16 @@ export function useCartoonMode(): UseCartoonModeReturn {
   const [tightCrop, setTightCrop] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // V1.5 Reactions Pack State
+  const [viewMode, setViewMode] = useState<'gallery' | 'detail'>('gallery');
+  const [selectedTemplateIds, setSelectedTemplateIds] = useState<string[]>(
+    CARTOON_REACTIONS_PACK.map((t) => t.id)
+  );
+  const [packPreviews, setPackPreviews] = useState<Record<string, PackStickerPreview>>({});
+  const [templateTransforms, setTemplateTransforms] = useState<Record<string, HeadTransform>>({});
+  const [templateBorderThicknesses, setTemplateBorderThicknesses] = useState<Record<string, number>>({});
+  const [isExportingZip, setIsExportingZip] = useState<boolean>(false);
+
   // Brush mask editing controls
   const [toolMode, setToolMode] = useState<'move' | 'erase' | 'restore'>('move');
   const [brushSize, setBrushSize] = useState<number>(24);
@@ -111,7 +187,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
   // Cached full selfie image element
   const selfieImgRef = useRef<HTMLImageElement | null>(null);
 
-  // Re-composite sticker whenever template, head, transform, or border changes
+  // Re-composite active sticker whenever active template, head, transform, or border changes
   const recomposite = useCallback(
     async (
       tpl: CartoonTemplateManifest,
@@ -131,9 +207,44 @@ export function useCartoonMode(): UseCartoonModeReturn {
         setArtworkCanvas(artCanvas);
         setStickerCanvas(stCanvas);
         setTightCrop(crop);
+
+        setPackPreviews((prev) => ({
+          ...prev,
+          [tpl.id]: {
+            artworkCanvas: artCanvas,
+            stickerCanvas: stCanvas,
+            tightCrop: crop,
+          },
+        }));
       } catch (err) {
         console.error('[useCartoonMode] Recomposition error:', err);
       }
+    },
+    []
+  );
+
+  // Re-render all 12 templates in reactions pack
+  const renderAllPackPreviews = useCallback(
+    async (
+      head: ExtractedHeadResult,
+      transforms: Record<string, HeadTransform>,
+      bThickness: number,
+      sLevel: number
+    ) => {
+      const newPreviews: Record<string, PackStickerPreview> = {};
+      for (let i = 0; i < CARTOON_REACTIONS_PACK.length; i++) {
+        const tpl = CARTOON_REACTIONS_PACK[i];
+        const tf = transforms[tpl.id] || computeInitialHeadPlacement(tpl, head);
+        const art = await renderCartoonArtwork(tpl, head, tf);
+        const dieCut = generateCartoonStickerDieCut(art, bThickness, sLevel);
+        newPreviews[tpl.id] = {
+          artworkCanvas: art,
+          stickerCanvas: dieCut.stickerCanvas,
+          tightCrop: dieCut.tightCrop,
+        };
+      }
+      setPackPreviews(newPreviews);
+      return newPreviews;
     },
     []
   );
@@ -146,7 +257,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
       setProgressMessage('Locating face and facial landmarks...');
 
       try {
-        // Step 1: Extract Head & Alpha Matte
+        // Step 1: Extract Head & Alpha Matte once
         setProgressMessage('Segmenting hair, face, and collar anchors...');
         const head = await extractPhotographicHead(img, {
           smoothness: 2,
@@ -156,21 +267,35 @@ export function useCartoonMode(): UseCartoonModeReturn {
 
         setExtractedHead(head);
 
-        // Step 2: Compute Auto Placement
-        setProgressMessage('Calculating natural head alignment & scale...');
-        const initialTransform = computeInitialHeadPlacement(activeTemplate, head);
-        setHeadTransform(initialTransform);
+        // Step 2: Compute initial auto placement for all 12 templates
+        setProgressMessage('Calculating natural head alignment across 12 reaction templates...');
+        const initialTransforms: Record<string, HeadTransform> = {};
+        for (const tpl of CARTOON_REACTIONS_PACK) {
+          initialTransforms[tpl.id] = computeInitialHeadPlacement(tpl, head);
+        }
+        setTemplateTransforms(initialTransforms);
 
-        // Step 3: Composite Layered Character & Smooth Cutline
-        setProgressMessage('Rendering 3-layer cartoon sticker...');
-        await recomposite(
-          activeTemplate,
+        const currentActiveTransform = initialTransforms[activeTemplate.id] || initialTransforms[HI_WAVING_TEMPLATE.id];
+        setHeadTransform(currentActiveTransform);
+
+        // Step 3: Composite entire 12-sticker collection
+        setProgressMessage('Rendering 12 personalized cartoon reaction stickers...');
+        const previews = await renderAllPackPreviews(
           head,
-          initialTransform,
+          initialTransforms,
           borderThickness,
           smoothOutlineLevel
         );
 
+        const activePreview = previews[activeTemplate.id] || previews[HI_WAVING_TEMPLATE.id];
+        if (activePreview) {
+          setArtworkCanvas(activePreview.artworkCanvas);
+          setStickerCanvas(activePreview.stickerCanvas);
+          setTightCrop(activePreview.tightCrop);
+        }
+
+        setSelectedTemplateIds(CARTOON_REACTIONS_PACK.map((t) => t.id));
+        setViewMode('gallery');
         setProgressMessage('');
       } catch (err: any) {
         console.error('[useCartoonMode] Processing failed:', err);
@@ -179,7 +304,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
         setIsProcessing(false);
       }
     },
-    [activeTemplate, borderThickness, smoothOutlineLevel, recomposite]
+    [activeTemplate, borderThickness, smoothOutlineLevel, renderAllPackPreviews]
   );
 
   const loadSelfieFile = useCallback(
@@ -217,6 +342,49 @@ export function useCartoonMode(): UseCartoonModeReturn {
     [processImage]
   );
 
+  // Switch to detail view for a specific template
+  const selectTemplateForEdit = useCallback(
+    (templateId: string) => {
+      const tpl = ALL_CARTOON_TEMPLATES[templateId] || HI_WAVING_TEMPLATE;
+      setActiveTemplate(tpl);
+
+      let tf = templateTransforms[templateId];
+      if (!tf && extractedHead) {
+        tf = computeInitialHeadPlacement(tpl, extractedHead);
+        setTemplateTransforms((prev) => ({ ...prev, [templateId]: tf }));
+      }
+      if (tf) {
+        setHeadTransform(tf);
+      }
+
+      const prev = packPreviews[templateId];
+      if (prev) {
+        setArtworkCanvas(prev.artworkCanvas);
+        setStickerCanvas(prev.stickerCanvas);
+        setTightCrop(prev.tightCrop);
+      } else if (extractedHead && tf) {
+        recomposite(tpl, extractedHead, tf, borderThickness, smoothOutlineLevel);
+      }
+
+      setViewMode('detail');
+    },
+    [templateTransforms, extractedHead, packPreviews, borderThickness, smoothOutlineLevel, recomposite]
+  );
+
+  const toggleTemplateSelection = useCallback((id: string) => {
+    setSelectedTemplateIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  }, []);
+
+  const selectAllTemplates = useCallback(() => {
+    setSelectedTemplateIds(CARTOON_REACTIONS_PACK.map((t) => t.id));
+  }, []);
+
+  const deselectAllTemplates = useCallback(() => {
+    setSelectedTemplateIds([]);
+  }, []);
+
   const updateHeadTransform = useCallback(
     (update: {
       centerX?: number;
@@ -241,6 +409,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
       };
 
       setHeadTransform(newTf);
+      setTemplateTransforms((prev) => ({ ...prev, [activeTemplate.id]: newTf }));
       recomposite(activeTemplate, extractedHead, newTf, borderThickness, smoothOutlineLevel);
     },
     [headTransform, extractedHead, activeTemplate, borderThickness, smoothOutlineLevel, recomposite]
@@ -253,15 +422,18 @@ export function useCartoonMode(): UseCartoonModeReturn {
       centerY: headTransform.autoPlacement.centerY,
       scale: headTransform.autoPlacement.scale,
       rotationDegrees: headTransform.autoPlacement.rotationDegrees,
+      hairBehindBody: headTransform.autoPlacement.hairBehindBody,
       autoPlacement: headTransform.autoPlacement,
     };
     setHeadTransform(resetTf);
+    setTemplateTransforms((prev) => ({ ...prev, [activeTemplate.id]: resetTf }));
     recomposite(activeTemplate, extractedHead, resetTf, borderThickness, smoothOutlineLevel);
   }, [headTransform, extractedHead, activeTemplate, borderThickness, smoothOutlineLevel, recomposite]);
 
   const setBorderThickness = useCallback(
     (val: number) => {
       setBorderThicknessState(val);
+      setTemplateBorderThicknesses((prev) => ({ ...prev, [activeTemplate.id]: val }));
       if (artworkCanvas) {
         const { stickerCanvas: stCanvas, tightCrop: crop } = generateCartoonStickerDieCut(
           artworkCanvas,
@@ -270,65 +442,143 @@ export function useCartoonMode(): UseCartoonModeReturn {
         );
         setStickerCanvas(stCanvas);
         setTightCrop(crop);
+
+        setPackPreviews((prev) => ({
+          ...prev,
+          [activeTemplate.id]: {
+            artworkCanvas,
+            stickerCanvas: stCanvas,
+            tightCrop: crop,
+          },
+        }));
       }
     },
-    [artworkCanvas, smoothOutlineLevel]
+    [artworkCanvas, activeTemplate.id, smoothOutlineLevel]
   );
 
   const exportArtworkPng = useCallback(() => {
     if (!artworkCanvas || !tightCrop) return;
-    // Export tightly cropped transparent PNG
-    const exportCanvas = document.createElement('canvas');
-    exportCanvas.width = tightCrop.width;
-    exportCanvas.height = tightCrop.height;
-    const eCtx = exportCanvas.getContext('2d');
-    if (!eCtx) return;
-
-    eCtx.drawImage(
-      artworkCanvas,
-      tightCrop.x,
-      tightCrop.y,
-      tightCrop.width,
-      tightCrop.height,
-      0,
-      0,
-      tightCrop.width,
-      tightCrop.height
-    );
-
+    const exportCanvas = getCroppedCanvas(artworkCanvas, tightCrop);
     const a = document.createElement('a');
-    a.download = `cartoon_hi_artwork_${Date.now()}.png`;
+    a.download = `cartoon_${activeTemplate.id}_artwork_${Date.now()}.png`;
     a.href = exportCanvas.toDataURL('image/png');
     a.click();
-  }, [artworkCanvas, tightCrop]);
+  }, [artworkCanvas, tightCrop, activeTemplate.id]);
 
   const exportStickerPng = useCallback(() => {
     if (!stickerCanvas || !tightCrop) return;
-    // Export tightly cropped white-backed sticker PNG
-    const exportCanvas = document.createElement('canvas');
-    exportCanvas.width = tightCrop.width;
-    exportCanvas.height = tightCrop.height;
-    const eCtx = exportCanvas.getContext('2d');
-    if (!eCtx) return;
-
-    eCtx.drawImage(
-      stickerCanvas,
-      tightCrop.x,
-      tightCrop.y,
-      tightCrop.width,
-      tightCrop.height,
-      0,
-      0,
-      tightCrop.width,
-      tightCrop.height
-    );
-
+    const exportCanvas = getCroppedCanvas(stickerCanvas, tightCrop);
     const a = document.createElement('a');
-    a.download = `cartoon_hi_sticker_${Date.now()}.png`;
+    a.download = `cartoon_${activeTemplate.id}_sticker_${Date.now()}.png`;
     a.href = exportCanvas.toDataURL('image/png');
     a.click();
-  }, [stickerCanvas, tightCrop]);
+  }, [stickerCanvas, tightCrop, activeTemplate.id]);
 
+  // Export full selected sticker pack as ZIP
+  const exportPackZip = useCallback(async () => {
+    if (!extractedHead) return;
+    setIsExportingZip(true);
+
+    try {
+      const selectedTemplates = CARTOON_REACTIONS_PACK.filter((tpl) =>
+        selectedTemplateIds.includes(tpl.id)
+      );
+
+      if (selectedTemplates.length === 0) {
+        throw new Error('Please select at least one sticker template to export.');
+      }
+
+      const zipEntries: ZipEntry[] = [];
+      const manifestStickers: any[] = [];
+
+      for (let i = 0; i < selectedTemplates.length; i++) {
+        const tpl = selectedTemplates[i];
+        let preview = packPreviews[tpl.id];
+
+        if (!preview) {
+          const tf = templateTransforms[tpl.id] || computeInitialHeadPlacement(tpl, extractedHead);
+          const bThick = templateBorderThicknesses[tpl.id] ?? borderThickness;
+          const art = await renderCartoonArtwork(tpl, extractedHead, tf);
+          const dieCut = generateCartoonStickerDieCut(art, bThick, smoothOutlineLevel);
+          preview = {
+            artworkCanvas: art,
+            stickerCanvas: dieCut.stickerCanvas,
+            tightCrop: dieCut.tightCrop,
+          };
+        }
+
+        const filename = getPackStickerFilename(tpl, i);
+
+        // 1. artwork_only/ (transparent PNG tightly cropped)
+        const artCropped = getCroppedCanvas(preview.artworkCanvas, preview.tightCrop);
+        const artBytes = canvasToPngUint8Array(artCropped);
+        zipEntries.push({
+          name: `artwork_only/${filename}`,
+          data: artBytes,
+        });
+
+        // 2. white_backed/ (die-cut white backed PNG tightly cropped)
+        const stickerCropped = getCroppedCanvas(preview.stickerCanvas, preview.tightCrop);
+        const stickerBytes = canvasToPngUint8Array(stickerCropped);
+        zipEntries.push({
+          name: `white_backed/${filename}`,
+          data: stickerBytes,
+        });
+
+        manifestStickers.push({
+          index: i + 1,
+          id: tpl.id,
+          name: tpl.name,
+          description: tpl.description,
+          artworkFile: `artwork_only/${filename}`,
+          stickerFile: `white_backed/${filename}`,
+          cropBounds: preview.tightCrop,
+          canvasWidth: preview.tightCrop.width,
+          canvasHeight: preview.tightCrop.height,
+        });
+      }
+
+      // 3. manifest.json
+      const manifest = {
+        packName: 'Sticker Studio Personalized Reactions Pack',
+        version: '1.5.0',
+        dateGenerated: new Date().toISOString(),
+        sourceSelfie: selfieFileName,
+        totalStickers: selectedTemplates.length,
+        stickers: manifestStickers,
+      };
+
+      const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2));
+      zipEntries.push({
+        name: 'manifest.json',
+        data: manifestBytes,
+      });
+
+      const zipBlob = createZip(zipEntries);
+      const downloadUrl = URL.createObjectURL(zipBlob);
+      const a = document.createElement('a');
+      a.download = `sticker_pack_${Date.now()}.zip`;
+      a.href = downloadUrl;
+      a.click();
+      URL.revokeObjectURL(downloadUrl);
+    } catch (err: any) {
+      console.error('[useCartoonMode] Zip export failed:', err);
+      setError(err.message || 'Failed to export sticker pack');
+    } finally {
+      setIsExportingZip(false);
+    }
+  }, [
+    extractedHead,
+    selectedTemplateIds,
+    packPreviews,
+    templateTransforms,
+    templateBorderThicknesses,
+    borderThickness,
+    smoothOutlineLevel,
+    selfieFileName,
+  ]);
+
+  // Synchronize brush strokes to extracted head and all templates
   const applyBrushStrokeToHead = useCallback(
     (points: StrokePoint[]) => {
       if (!extractedHead || points.length === 0 || toolMode === 'move') return;
@@ -383,11 +633,26 @@ export function useCartoonMode(): UseCartoonModeReturn {
       setUndoStack((prev) => [...prev, patch]);
       setRedoStack([]);
 
+      // Recomposite active template immediately
       if (headTransform) {
         recomposite(activeTemplate, extractedHead, headTransform, borderThickness, smoothOutlineLevel);
       }
+
+      // Re-render all 12 pack previews in background so gallery remains accurate
+      renderAllPackPreviews(extractedHead, templateTransforms, borderThickness, smoothOutlineLevel);
     },
-    [extractedHead, toolMode, brushSize, headTransform, activeTemplate, borderThickness, smoothOutlineLevel, recomposite]
+    [
+      extractedHead,
+      toolMode,
+      brushSize,
+      headTransform,
+      activeTemplate,
+      borderThickness,
+      smoothOutlineLevel,
+      templateTransforms,
+      recomposite,
+      renderAllPackPreviews,
+    ]
   );
 
   const undo = useCallback(() => {
@@ -442,7 +707,18 @@ export function useCartoonMode(): UseCartoonModeReturn {
     if (headTransform) {
       recomposite(activeTemplate, extractedHead, headTransform, borderThickness, smoothOutlineLevel);
     }
-  }, [extractedHead, undoStack, headTransform, activeTemplate, borderThickness, smoothOutlineLevel, recomposite]);
+    renderAllPackPreviews(extractedHead, templateTransforms, borderThickness, smoothOutlineLevel);
+  }, [
+    extractedHead,
+    undoStack,
+    headTransform,
+    activeTemplate,
+    borderThickness,
+    smoothOutlineLevel,
+    templateTransforms,
+    recomposite,
+    renderAllPackPreviews,
+  ]);
 
   const redo = useCallback(() => {
     if (!extractedHead || redoStack.length === 0) return;
@@ -496,13 +772,24 @@ export function useCartoonMode(): UseCartoonModeReturn {
     if (headTransform) {
       recomposite(activeTemplate, extractedHead, headTransform, borderThickness, smoothOutlineLevel);
     }
-  }, [extractedHead, redoStack, headTransform, activeTemplate, borderThickness, smoothOutlineLevel, recomposite]);
+    renderAllPackPreviews(extractedHead, templateTransforms, borderThickness, smoothOutlineLevel);
+  }, [
+    extractedHead,
+    redoStack,
+    headTransform,
+    activeTemplate,
+    borderThickness,
+    smoothOutlineLevel,
+    templateTransforms,
+    recomposite,
+    renderAllPackPreviews,
+  ]);
 
   const saveProjectJson = useCallback(() => {
     if (!selfieDataUrl || !headTransform || !extractedHead) return;
 
     const proj: CartoonProjectData = {
-      version: 3,
+      version: 4,
       appMode: 'cartoon',
       templateId: activeTemplate.id,
       selfieDataUrl,
@@ -518,15 +805,28 @@ export function useCartoonMode(): UseCartoonModeReturn {
       alphaMaskBase64: uint8ArrayToBase64(extractedHead.alphaMask),
       rawCropMaskBase64: extractedHead.rawCropMask ? uint8ArrayToBase64(extractedHead.rawCropMask) : undefined,
       landmarks: extractedHead.landmarks,
+      templateTransforms,
+      templateBorderThicknesses,
+      selectedTemplateIds,
       dateModified: new Date().toISOString(),
     };
 
     const blob = new Blob([JSON.stringify(proj, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
-    a.download = `cartoon_project_${activeTemplate.id}_${Date.now()}.stickerstudio`;
+    a.download = `cartoon_pack_project_${Date.now()}.stickerstudio`;
     a.href = URL.createObjectURL(blob);
     a.click();
-  }, [selfieDataUrl, headTransform, extractedHead, activeTemplate, borderThickness, smoothOutlineLevel]);
+  }, [
+    selfieDataUrl,
+    headTransform,
+    extractedHead,
+    activeTemplate.id,
+    borderThickness,
+    smoothOutlineLevel,
+    templateTransforms,
+    templateBorderThicknesses,
+    selectedTemplateIds,
+  ]);
 
   const loadProjectJson = useCallback(
     async (jsonString: string) => {
@@ -551,7 +851,6 @@ export function useCartoonMode(): UseCartoonModeReturn {
             img.src = proj.headPngDataUrl!;
           });
 
-          // Rehydrate selfieImgRef so brush Erase/Restore can access original photographic RGB
           let selfiePromise: Promise<void> | null = null;
           if (proj.selfieDataUrl) {
             const selfieImg = new Image();
@@ -610,10 +909,49 @@ export function useCartoonMode(): UseCartoonModeReturn {
           };
 
           setExtractedHead(restoredHead);
-          setHeadTransform(proj.headTransform);
           setUndoStack([]);
           setRedoStack([]);
-          await recomposite(tpl, restoredHead, proj.headTransform, proj.borderThickness, proj.smoothOutlineLevel);
+
+          // Restore template transforms or compute defaults for v3 projects
+          const restoredTransforms: Record<string, HeadTransform> = proj.templateTransforms || {};
+          for (const item of CARTOON_REACTIONS_PACK) {
+            if (!restoredTransforms[item.id]) {
+              if (item.id === tpl.id) {
+                restoredTransforms[item.id] = proj.headTransform;
+              } else {
+                restoredTransforms[item.id] = computeInitialHeadPlacement(item, restoredHead);
+              }
+            }
+          }
+          setTemplateTransforms(restoredTransforms);
+
+          const curTransform = restoredTransforms[tpl.id] || proj.headTransform;
+          setHeadTransform(curTransform);
+
+          if (proj.templateBorderThicknesses) {
+            setTemplateBorderThicknesses(proj.templateBorderThicknesses);
+          }
+          if (proj.selectedTemplateIds) {
+            setSelectedTemplateIds(proj.selectedTemplateIds);
+          } else {
+            setSelectedTemplateIds(CARTOON_REACTIONS_PACK.map((t) => t.id));
+          }
+
+          const previews = await renderAllPackPreviews(
+            restoredHead,
+            restoredTransforms,
+            proj.borderThickness,
+            proj.smoothOutlineLevel
+          );
+
+          const activePrev = previews[tpl.id];
+          if (activePrev) {
+            setArtworkCanvas(activePrev.artworkCanvas);
+            setStickerCanvas(activePrev.stickerCanvas);
+            setTightCrop(activePrev.tightCrop);
+          }
+
+          setViewMode('gallery');
         } else {
           // Fallback legacy project load
           const img = new Image();
@@ -632,7 +970,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
         setError('Failed to load cartoon project: ' + err.message);
       }
     },
-    [recomposite]
+    [recomposite, renderAllPackPreviews]
   );
 
   return {
@@ -651,11 +989,23 @@ export function useCartoonMode(): UseCartoonModeReturn {
     tightCrop,
     error,
 
+    viewMode,
+    templates: CARTOON_REACTIONS_PACK,
+    selectedTemplateIds,
+    packPreviews,
+    templateTransforms,
+    isExportingZip,
+
     toolMode,
     brushSize,
     canUndo: undoStack.length > 0,
     canRedo: redoStack.length > 0,
 
+    setViewMode,
+    selectTemplateForEdit,
+    toggleTemplateSelection,
+    selectAllTemplates,
+    deselectAllTemplates,
     setToolMode,
     setBrushSize,
     undo,
@@ -670,6 +1020,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
     setPreviewBg,
     exportArtworkPng,
     exportStickerPng,
+    exportPackZip,
     saveProjectJson,
     loadProjectJson,
   };
