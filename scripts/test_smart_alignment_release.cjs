@@ -320,6 +320,12 @@ async function runReleaseChecks() {
   }
   console.log('  ✓ Verified: All 12 templates scaled by exactly 1.10x and rotated by +3.0° proportionally around chin.');
 
+  // Capture Screenshot of Adjust All Heads UI (Global Scope)
+  const uiGlobalPath = path.join(OUTPUT_DIR, 'ui_adjust_all_heads_global.png');
+  await page.screenshot({ path: uiGlobalPath });
+  fs.copyFileSync(uiGlobalPath, path.join(ARTIFACT_DIR, 'ui_adjust_all_heads_global.png'));
+  console.log('  ✓ Captured Screenshot: ui_adjust_all_heads_global.png');
+
   // Capture global-only sleepy-06 for comparison
   const sleepyGlobalOnlyBuf = await page.evaluate(async () => {
     const prev = window.__lastCartoonState.packPreviews['sleepy-06'];
@@ -376,6 +382,12 @@ async function runReleaseChecks() {
   }
   console.log(`  ✓ Verified: Sleepy-06 successfully fine-tuned with individual override: scaleMultiplier=0.95, rotationDelta=-2°.`);
 
+  // Capture Screenshot of Adjust All Heads UI (Individual Sleepy Scope)
+  const uiIndivPath = path.join(OUTPUT_DIR, 'ui_adjust_all_heads_individual_sleepy.png');
+  await page.screenshot({ path: uiIndivPath });
+  fs.copyFileSync(uiIndivPath, path.join(ARTIFACT_DIR, 'ui_adjust_all_heads_individual_sleepy.png'));
+  console.log('  ✓ Captured Screenshot: ui_adjust_all_heads_individual_sleepy.png');
+
   // 6. Test Pack-wide Global Update with Individual Override Retained
   console.log('\n  -> Switching Scope back to "All 12 Stickers (Global)" and adjusting Head Size to 115%...');
   await scopeAllBtn.click();
@@ -420,6 +432,12 @@ async function runReleaseChecks() {
   if (!calibBox) throw new Error('Calibration modal box not found!');
   await page.mouse.click(calibBox.x + calibBox.width / 2, calibBox.y + calibBox.height / 2 + 30);
   await page.waitForTimeout(200);
+
+  // Capture Screenshot of Chin Calibration Modal
+  const uiModalPath = path.join(OUTPUT_DIR, 'ui_chin_calibration_modal.png');
+  await page.screenshot({ path: uiModalPath });
+  fs.copyFileSync(uiModalPath, path.join(ARTIFACT_DIR, 'ui_chin_calibration_modal.png'));
+  console.log('  ✓ Captured Screenshot: ui_chin_calibration_modal.png');
 
   // Click "Save Chin Anchor"
   await page.click('button:has-text("Save Chin Anchor")');
@@ -698,6 +716,55 @@ async function runReleaseChecks() {
   console.log('  ✓ All 24 PNGs validated: transparent artwork, white backing, and unclipped outlines.');
 
   // -------------------------------------------------------------
+  // TEST LEGACY V4 / V3 PROJECT ARCHIVE BACKWARD COMPATIBILITY
+  // -------------------------------------------------------------
+  console.log('\n[9/9] Verifying Legacy V4 / V3 Project Archive Compatibility...');
+  const legacyV4Path = path.resolve('test-output/butterfern_release_checks/ui_saved_project.stickerstudio');
+  if (fs.existsSync(legacyV4Path)) {
+    console.log('  Reloading browser for clean legacy V4 project test...');
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForSelector('text=Click to browse photo', { timeout: 10000 });
+
+    const legacyProjectInput = page.locator('input[type="file"][accept*=".stickerstudio"]');
+    await legacyProjectInput.setInputFiles(legacyV4Path);
+    await page.waitForSelector('text=Pack Collection:', { timeout: 20000 });
+    await page.waitForFunction(() => {
+      const st = window.__lastCartoonState;
+      return st && st.packPreviews && Object.keys(st.packPreviews).length === 12;
+    }, { timeout: 30000 });
+
+    const legacyState = await page.evaluate(() => {
+      const st = window.__lastCartoonState;
+      return {
+        global: st.globalHeadAlignment,
+        individual: st.individualHeadAlignments,
+        chin: st.calibratedChin,
+        border01: st.templateBorderThicknesses['hi-waving-01'],
+        border02: st.templateBorderThicknesses['love-you-02'],
+      };
+    });
+
+    if (legacyState.global.scaleMultiplier !== 1.0 || legacyState.global.rotationDelta !== 0 || legacyState.global.offsetY !== 0) {
+      throw new Error(`Legacy project global alignment not neutral: ${JSON.stringify(legacyState.global)}`);
+    }
+    if (Object.keys(legacyState.individual).length !== 0) {
+      throw new Error(`Legacy project individual alignments not empty: ${JSON.stringify(legacyState.individual)}`);
+    }
+    if (legacyState.chin !== null) {
+      throw new Error(`Legacy project calibrated chin not null: ${legacyState.chin}`);
+    }
+    if (legacyState.border01 !== 36 || legacyState.border02 !== 16) {
+      throw new Error(`Legacy custom borders not preserved: 01=${legacyState.border01}, 02=${legacyState.border02}`);
+    }
+
+    const uiLegacyPath = path.join(OUTPUT_DIR, 'ui_legacy_v4_reopened.png');
+    await page.screenshot({ path: uiLegacyPath });
+    fs.copyFileSync(uiLegacyPath, path.join(ARTIFACT_DIR, 'ui_legacy_v4_reopened.png'));
+    console.log('  ✓ Legacy V4 project opened with neutral global alignment and preserved appearance.');
+    metrics.legacyV4BackwardCompatible = true;
+  }
+
+  // -------------------------------------------------------------
   // BUILD V1.6 FINAL REVIEW PACKAGE ZIP
   // -------------------------------------------------------------
   console.log('\nAssembling Smart Pack Alignment V1.6 Review Package ZIP...');
@@ -705,6 +772,12 @@ async function runReleaseChecks() {
   reviewZip.file('little_big_feelings_before_global_alignment.png', beforeContactSheetBuf);
   reviewZip.file('little_big_feelings_after_global_alignment.png', afterContactSheetBuf);
   reviewZip.file('sleepy_individual_override_comparison.png', sleepyCompBuf);
+  reviewZip.file('ui_adjust_all_heads_global.png', fs.readFileSync(path.join(OUTPUT_DIR, 'ui_adjust_all_heads_global.png')));
+  reviewZip.file('ui_adjust_all_heads_individual_sleepy.png', fs.readFileSync(path.join(OUTPUT_DIR, 'ui_adjust_all_heads_individual_sleepy.png')));
+  reviewZip.file('ui_chin_calibration_modal.png', fs.readFileSync(path.join(OUTPUT_DIR, 'ui_chin_calibration_modal.png')));
+  if (fs.existsSync(path.join(OUTPUT_DIR, 'ui_legacy_v4_reopened.png'))) {
+    reviewZip.file('ui_legacy_v4_reopened.png', fs.readFileSync(path.join(OUTPUT_DIR, 'ui_legacy_v4_reopened.png')));
+  }
   reviewZip.file('saved_project_v5.stickerstudio', fs.readFileSync(savedProjectPath));
   reviewZip.file('downloaded_reactions_pack.zip', fs.readFileSync(appDownloadedZipPath));
   reviewZip.file('manifest.json', JSON.stringify(manifestJson, null, 2));
