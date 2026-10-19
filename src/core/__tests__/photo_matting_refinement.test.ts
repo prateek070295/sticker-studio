@@ -11,6 +11,7 @@ import {
 import { mergeAttachedAccessories } from '../accessoryAttacher';
 import { detectPeopleInPhoto } from '../mediaPipeSegmenter';
 import { composePhotoCutout } from '../photoAdapter';
+import { saveProjectArchive, loadProjectArchive } from '../projectArchive';
 import { BoundingBox } from '../../types';
 
 describe('Sticker Studio V1.7 — Photo Matting & Edge Refinement Core', () => {
@@ -497,5 +498,210 @@ describe('Sticker Studio V1.7 — Photo Matting & Edge Refinement Core', () => {
     // Unrelated background island (x=2..6, y=2..6) should NOT expand output bounds to 2
     expect(composed.bounds.x).toBeGreaterThan(6);
     expect(composed.bounds.y).toBeGreaterThan(6);
+  });
+
+  it('11. Multi-person protection preserves smaller child (<25% adult size) and attached accessory while excluding distant background object', () => {
+    const W = 100;
+    const H = 100;
+    const mask = new Uint8Array(W * H);
+
+    // Large adult: x in [30..70], y in [20..80] (area = 40 * 60 = 2400)
+    for (let y = 20; y < 80; y++) {
+      for (let x = 30; x < 70; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    // Small child: x in [5..20], y in [45..75] (area = 15 * 30 = 450, < 20% of adult)
+    for (let y = 45; y < 75; y++) {
+      for (let x = 5; x < 20; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    // Hair accessory touching adult head: x in [22..29], y in [24..30]
+    for (let y = 24; y < 30; y++) {
+      for (let x = 22; x < 29; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    // Distant background picture/lamp: x in [85..95], y in [5..15]
+    for (let y = 5; y < 15; y++) {
+      for (let x = 85; x < 95; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    const adultBox: BoundingBox = { x: 30, y: 20, width: 40, height: 60 };
+    const childBox: BoundingBox = { x: 5, y: 45, width: 15, height: 30 };
+
+    const merged = mergeAttachedAccessories(mask, W, H, adultBox, {
+      protectedBoxes: [adultBox, childBox],
+      maxAttachmentDistance: 16,
+      headZoneRatio: 0.65,
+    });
+
+    const outMask = merged.mask;
+
+    // 1. Adult is retained
+    expect(outMask[50 * W + 50]).toBe(1);
+
+    // 2. Small child is strictly retained (never classified as noise or dropped)
+    expect(outMask[60 * W + 10]).toBe(1);
+
+    // 3. Attached accessory is retained
+    expect(outMask[27 * W + 25]).toBe(1);
+
+    // 4. Distant background object is excluded
+    expect(outMask[10 * W + 90]).toBe(0);
+  });
+
+  it('12. Lossless Better/Best project save and reopen guarantees exact bitwise decoded equality without re-segmentation', async () => {
+    const W = 40;
+    const H = 40;
+    const imgData = new ImageData(W, H);
+    for (let i = 0; i < W * H * 4; i += 4) {
+      imgData.data[i] = 120;
+      imgData.data[i + 1] = 140;
+      imgData.data[i + 2] = 160;
+      imgData.data[i + 3] = 255;
+    }
+
+    const alphaMask = new Uint8Array(W * H);
+    const confidence = new Float32Array(W * H);
+    for (let y = 10; y < 30; y++) {
+      for (let x = 10; x < 30; x++) {
+        alphaMask[y * W + x] = 255;
+        confidence[y * W + x] = 0.92;
+      }
+    }
+
+    const confBytes = new Uint8Array(confidence.buffer, confidence.byteOffset, confidence.byteLength);
+    const confBase64 = Buffer.from(confBytes).toString('base64');
+    const maskBase64 = Buffer.from(alphaMask).toString('base64');
+
+    const resolvedAlpha = new Uint8Array(W * H);
+    resolvedAlpha.set(alphaMask);
+    // Add fractional alpha on border
+    resolvedAlpha[9 * W + 15] = 128;
+    const resolvedAlphaBase64 = Buffer.from(resolvedAlpha).toString('base64');
+
+    const zipBlob = await saveProjectArchive({
+      name: 'lossless_matting_test',
+      sourceImage: imgData,
+      alphaMask,
+      settings: {
+        bgTolerance: 15,
+        edgeSoftness: 1,
+        minComponentArea: 20,
+        groupingProximityThreshold: 35,
+        enableTitleDetection: false,
+      },
+      components: [],
+      groups: [],
+      holes: [],
+      globalBorderThickness: 20,
+      globalSolidBacking: false,
+      globalWhiteBacking: true,
+      projectType: 'photo',
+      photoSettings: {
+        borderThickness: 20,
+        previewBg: 'dark',
+        hasRemovedBackground: true,
+        qualityMode: 'best',
+        decontaminateEdge: true,
+        hairDetail: 6,
+        accessoryMerge: true,
+        alphaMatteData: resolvedAlphaBase64,
+        personRegions: [
+          {
+            id: 'p1',
+            label: 'Person 1',
+            box: { x: 10, y: 10, width: 20, height: 20 },
+            score: 0.95,
+            included: true,
+            isManual: false,
+            maskData: maskBase64,
+            confidenceData: confBase64,
+          },
+        ],
+      },
+    });
+
+    const file = new File([zipBlob], 'lossless_matting_test.stickerstudio');
+    const loaded = await loadProjectArchive(file);
+
+    expect(loaded.metadata.projectType).toBe('photo');
+    expect(loaded.metadata.photoSettings?.qualityMode).toBe('best');
+    expect(loaded.metadata.photoSettings?.alphaMatteData).toBe(resolvedAlphaBase64);
+
+    const restoredRegion = loaded.metadata.photoSettings?.personRegions?.[0];
+    expect(restoredRegion).toBeDefined();
+    expect(restoredRegion?.confidenceData).toBe(confBase64);
+
+    // Decode and verify exact bitwise equality of confidence floats
+    const restoredConfBytes = Buffer.from(restoredRegion!.confidenceData!, 'base64');
+    const restoredConfFloats = new Float32Array(
+      restoredConfBytes.buffer.slice(restoredConfBytes.byteOffset, restoredConfBytes.byteOffset + restoredConfBytes.byteLength)
+    );
+    expect(Array.from(restoredConfFloats)).toEqual(Array.from(confidence));
+
+    // Verify precomputed alpha matte decoded equality
+    const restoredAlpha = Buffer.from(loaded.metadata.photoSettings!.alphaMatteData!, 'base64');
+    expect(Array.from(restoredAlpha)).toEqual(Array.from(resolvedAlpha));
+  });
+
+  it('13. Erase/Restore manual brush delta preserves exact user overrides across save/reload', async () => {
+    const W = 30;
+    const H = 30;
+    const imgData = new ImageData(W, H);
+    const alphaMask = new Uint8Array(W * H);
+    const delta = new Int8Array(W * H);
+
+    // User erased 2 pixels and restored 1 pixel
+    delta[5 * W + 5] = -1;
+    delta[5 * W + 6] = -1;
+    delta[15 * W + 15] = 1;
+
+    const deltaBytes = new Uint8Array(delta.buffer, delta.byteOffset, delta.byteLength);
+    const deltaBase64 = Buffer.from(deltaBytes).toString('base64');
+
+    const zipBlob = await saveProjectArchive({
+      name: 'delta_persistence_test',
+      sourceImage: imgData,
+      alphaMask,
+      settings: {
+        bgTolerance: 15,
+        edgeSoftness: 1,
+        minComponentArea: 20,
+        groupingProximityThreshold: 35,
+        enableTitleDetection: false,
+      },
+      components: [],
+      groups: [],
+      holes: [],
+      globalBorderThickness: 20,
+      globalSolidBacking: false,
+      globalWhiteBacking: true,
+      projectType: 'photo',
+      photoSettings: {
+        borderThickness: 20,
+        previewBg: 'checker',
+        hasRemovedBackground: true,
+        qualityMode: 'better',
+        manualDelta: deltaBase64,
+      },
+    });
+
+    const file = new File([zipBlob], 'delta_persistence_test.stickerstudio');
+    const loaded = await loadProjectArchive(file);
+
+    expect(loaded.metadata.photoSettings?.manualDelta).toBe(deltaBase64);
+    const loadedDeltaBytes = Buffer.from(loaded.metadata.photoSettings!.manualDelta!, 'base64');
+    const loadedDelta = new Int8Array(
+      loadedDeltaBytes.buffer.slice(loadedDeltaBytes.byteOffset, loadedDeltaBytes.byteOffset + loadedDeltaBytes.byteLength)
+    );
+    expect(Array.from(loadedDelta)).toEqual(Array.from(delta));
   });
 });

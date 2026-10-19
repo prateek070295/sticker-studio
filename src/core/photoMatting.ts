@@ -412,6 +412,29 @@ export function solveGuidedAlphaMatte(
 
   const stride = rgb.length >= size * 4 ? 4 : 3;
 
+  // Guard against all-zero confidenceMap prior
+  let validConfidence = confidenceMap;
+  if (validConfidence) {
+    let hasNonZero = false;
+    for (let i = 0; i < validConfidence.length; i += 16) {
+      if (validConfidence[i] > 0) {
+        hasNonZero = true;
+        break;
+      }
+    }
+    if (!hasNonZero) {
+      for (let i = 0; i < validConfidence.length; i++) {
+        if (validConfidence[i] > 0) {
+          hasNonZero = true;
+          break;
+        }
+      }
+    }
+    if (!hasNonZero) {
+      validConfidence = undefined;
+    }
+  }
+
   for (let ry = 0; ry < roiH; ry++) {
     const gy = roiY + ry;
     const gRow = gy * width;
@@ -432,10 +455,10 @@ export function solveGuidedAlphaMatte(
       } else if (t === 0) {
         p[rIdx] = 0.0;
       } else {
-        // Unknown band prior: use model continuous confidence if available,
+        // Unknown band prior: use model continuous confidence if available and non-zero,
         // or properly normalized foreground indicator (not crushed by 1/255)
-        if (confidenceMap && confidenceMap.length === size) {
-          p[rIdx] = Math.max(0.0, Math.min(1.0, confidenceMap[gIdx]));
+        if (validConfidence && validConfidence.length === size) {
+          p[rIdx] = Math.max(0.0, Math.min(1.0, validConfidence[gIdx]));
         } else {
           const val = coarseAlpha[gIdx];
           p[rIdx] = val > 1 ? val / 255.0 : (val === 1 ? 1.0 : 0.0);

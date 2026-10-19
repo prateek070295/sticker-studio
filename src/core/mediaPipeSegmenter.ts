@@ -427,8 +427,20 @@ export function combinePersonConfidence(
   regions: PersonRegion[],
   W: number,
   H: number
-): Float32Array {
+): Float32Array | undefined {
+  if (!regions || regions.length === 0) return undefined;
+
+  let hasAnyConfidence = false;
+  for (const r of regions) {
+    if (r.included && r.cropConfidence && r.cropConfidence.length > 0) {
+      hasAnyConfidence = true;
+      break;
+    }
+  }
+  if (!hasAnyConfidence) return undefined;
+
   const globalConf = new Float32Array(W * H);
+  let maxVal = 0;
 
   for (const region of regions) {
     if (!region.included || !region.cropConfidence || !region.cropBounds) continue;
@@ -451,10 +463,14 @@ export function combinePersonConfidence(
         const gIdx = gRowOff + gx;
         if (val > globalConf[gIdx]) {
           globalConf[gIdx] = val;
+          if (val > maxVal) maxVal = val;
         }
       }
     }
   }
+
+  // Do not treat an all-zero placeholder confidence array as a valid recovered MediaPipe prior
+  if (maxVal === 0) return undefined;
 
   return globalConf;
 }

@@ -14,6 +14,8 @@ export interface AccessoryMergeOptions {
   headZoneRatio?: number; // default top 65% of person height
   minAccessoryPixels?: number; // default 15 px
   maxAccessoryPixels?: number; // default 25% of image
+  protectedBoxes?: BoundingBox[]; // Bounding boxes of all user-selected people (e.g. adults, children)
+  confidenceMap?: Float32Array; // Continuous model confidence to recover cut-off accessory details
 }
 
 export interface AccessoryMergeResult {
@@ -58,8 +60,6 @@ export function mergeAttachedAccessories(
   const headZoneRatio = options.headZoneRatio ?? 0.65;
   const minPixels = options.minAccessoryPixels ?? 15;
   const maxPixels = options.maxAccessoryPixels ?? Math.round(size * 0.25);
-
-  const headYThreshold = coreBox.y + coreBox.height * headZoneRatio;
 
   // 1. Connected Component Labeling (8-way)
   const labels = new Int32Array(size);
@@ -136,8 +136,22 @@ export function mergeAttachedAccessories(
     return { mask: new Uint8Array(rawMask), attachedCount: 0, accessoryBoxes: [] };
   }
 
-  // 2. Classify Primary Person Component
-  // Find the single dominant component with the maximum pixel count inside coreBox
+  // 2. Classify Primary & Protected Person Components
+  // Every user-selected person region in protectedBoxes is guaranteed protection
+  const protectedBoxes = options.protectedBoxes && options.protectedBoxes.length > 0
+    ? options.protectedBoxes
+    : [coreBox];
+
+  function overlapsBox(c: ComponentInfo, b: BoundingBox): boolean {
+    return !(
+      c.maxX < b.x ||
+      b.x + b.width < c.minX ||
+      c.maxY < b.y ||
+      b.y + b.height < c.minY
+    );
+  }
+
+  // Find dominant component for coreBox
   const cMinX = Math.max(0, coreBox.x);
   const cMaxX = Math.min(width - 1, coreBox.x + coreBox.width);
   const cMinY = Math.max(0, coreBox.y);
@@ -174,35 +188,38 @@ export function mergeAttachedAccessories(
     primaryCompIdx = maxIdx;
   }
 
-  // Mark the dominant component (and any massive components > 35% of its size) as primary
   const mainPixelCount = components[primaryCompIdx].pixelCount;
+
+  // Mark all components overlapping ANY protected box as primary
+  // Also preserve dominant component and massive components (>45% of dominant)
   for (let i = 0; i < components.length; i++) {
     const comp = components[i];
-    if (i === primaryCompIdx || comp.pixelCount > mainPixelCount * 0.45) {
+    const isDominant = (i === primaryCompIdx || comp.pixelCount > mainPixelCount * 0.45);
+    const overlapsAnyProtected = protectedBoxes.some(box => overlapsBox(comp, box));
+
+    if (isDominant || overlapsAnyProtected) {
       comp.isPrimary = true;
     }
   }
 
   // Build binary primary mask to calculate Euclidean distance to primary
   const primaryMask = new Uint8Array(size);
-  let pMinY = height;
-  let pMaxY = 0;
-
   for (const comp of components) {
     if (comp.isPrimary) {
       for (const idx of comp.pixels) {
         primaryMask[idx] = 1;
-        const py = Math.floor(idx / width);
-        if (py < pMinY) pMinY = py;
-        if (py > pMaxY) pMaxY = py;
       }
     }
   }
 
-  const primaryHeight = Math.max(20, pMaxY - pMinY + 1);
-  const effectiveHeadThreshold = pMinY + primaryHeight * headZoneRatio;
-
+  // Distance to all primary person pixels
   const distToPrimary = computeEuclideanDistanceTransform(primaryMask, width, height);
+
+  // Compute head zone thresholds for each protected person box
+  const personHeadZones = protectedBoxes.map(b => ({
+    minY: Math.max(0, b.y - 10),
+    maxY: b.y + b.height * headZoneRatio,
+  }));
 
   // 3. Evaluate non-primary candidate components
   const outMask = new Uint8Array(size);
@@ -217,11 +234,13 @@ export function mergeAttachedAccessories(
     // Reject components that are too small or excessively large
     if (comp.pixelCount < minPixels || comp.pixelCount > maxPixels) continue;
 
-    // Check if in head/hair/temple/crown zone of primary person
-    const isHeadZone = comp.minY <= effectiveHeadThreshold || comp.maxY <= effectiveHeadThreshold;
-    if (!isHeadZone) continue;
+    // Check if component falls within the head zone of ANY protected person
+    const isNearAnyHead = personHeadZones.some(hz => {
+      return (comp.minY <= hz.maxY && comp.maxY >= hz.minY);
+    });
+    if (!isNearAnyHead) continue;
 
-    // Find minimum distance of this component to primary mask
+    // Find minimum distance of this component to any primary person pixel
     let minDist = Infinity;
     for (const idx of comp.pixels) {
       const d = distToPrimary[idx];
@@ -235,16 +254,37 @@ export function mergeAttachedAccessories(
     // Reject unrelated background objects that are distant
     if (minDist <= maxDist) {
       attachedCount++;
-      attachedBoxes.push({
+      const aBox: BoundingBox = {
         x: comp.minX,
         y: comp.minY,
         width: comp.maxX - comp.minX + 1,
         height: comp.maxY - comp.minY + 1,
-      });
+      };
+      attachedBoxes.push(aBox);
 
-      // Add component pixels directly to result WITHOUT drawing artificial visible bridge lines
+      // Add component pixels directly to result without artificial bridge lines
       for (const idx of comp.pixels) {
         outMask[idx] = 1;
+      }
+
+      // Recover any soft / continuous confidence pixels around this accessory that were truncated
+      if (options.confidenceMap) {
+        const conf = options.confidenceMap;
+        const pad = 4;
+        const xStart = Math.max(0, aBox.x - pad);
+        const xEnd = Math.min(width - 1, aBox.x + aBox.width + pad);
+        const yStart = Math.max(0, aBox.y - pad);
+        const yEnd = Math.min(height - 1, aBox.y + aBox.height + pad);
+
+        for (let y = yStart; y <= yEnd; y++) {
+          const rowOff = y * width;
+          for (let x = xStart; x <= xEnd; x++) {
+            const idx = rowOff + x;
+            if (outMask[idx] === 0 && conf[idx] >= 0.28) {
+              outMask[idx] = 1;
+            }
+          }
+        }
       }
     }
   }
@@ -254,53 +294,4 @@ export function mergeAttachedAccessories(
     attachedCount,
     accessoryBoxes: attachedBoxes,
   };
-}
-
-/**
- * Draws a 2px-wide bridge line between two points to guarantee topological connection.
- */
-function drawBridge(
-  mask: Uint8Array,
-  width: number,
-  height: number,
-  x0: number,
-  y0: number,
-  x1: number,
-  y1: number
-): void {
-  const dx = Math.abs(x1 - x0);
-  const dy = Math.abs(y1 - y0);
-  const sx = x0 < x1 ? 1 : -1;
-  const sy = y0 < y1 ? 1 : -1;
-  let err = dx - dy;
-
-  let cx = x0;
-  let cy = y0;
-
-  while (true) {
-    // Fill 2x2 footprint
-    for (let by = 0; by <= 1; by++) {
-      const py = cy + by;
-      if (py >= 0 && py < height) {
-        const row = py * width;
-        for (let bx = 0; bx <= 1; bx++) {
-          const px = cx + bx;
-          if (px >= 0 && px < width) {
-            mask[row + px] = 1;
-          }
-        }
-      }
-    }
-
-    if (cx === x1 && cy === y1) break;
-    const e2 = 2 * err;
-    if (e2 > -dy) {
-      err -= dy;
-      cx += sx;
-    }
-    if (e2 < dx) {
-      err += dx;
-      cy += sy;
-    }
-  }
 }

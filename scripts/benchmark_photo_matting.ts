@@ -1,34 +1,36 @@
 /**
- * STICKER STUDIO V1.7 — ISOLATED PHOTO MATTING QUALITY EXPERIMENT
+ * STICKER STUDIO V1.7 — REAL PHOTO MATTING QUALITY BENCHMARK
  *
- * Evaluates and compares three candidate algorithms on real portrait fixtures:
- * - Candidate A: Baseline V1.6 (Binary segmentation + Distance-Transform smoothing)
- * - Candidate B: Preserved Continuous Confidence + Joint RGB-Guided Upsampling
- * - Candidate C: Narrow-ROI Trimap + Closed-Form Guided Matting + Guarded Physical Decontamination
+ * Compares the three production quality modes:
+ * - FAST (V1.6 Baseline: binary mask + distance transform smoothing)
+ * - BETTER (V1.7 Guided RGB Alpha Matting, no decontamination)
+ * - BEST (V1.7 Guided RGB Alpha Matting + Guarded Edge Color Decontamination)
+ *
+ * All priors are genuine MediaPipe selfie segmentation confidence maps & masks
+ * extracted directly from the actual image pixels with ZERO manual confidence injection.
  *
  * Produces:
- * - Full-resolution artwork-only PNGs
- * - 400% zoom crops of hair, accessory, and diagonal clothing boundaries
- * - Previews across Black, White, Neutral Grey, and Vibrant Cyan backdrops
- * - Trimap and Alpha debug visualizations
+ * - Full-resolution artwork-only PNGs for Fast, Better, and Best
+ * - 400% zoom crops of hair, accessory, and diagonal clothing boundaries on Black, White, Grey, and Cyan
+ * - Alpha matte and Trimap debug PNGs
  * - 4-way side-by-side comparison contact sheets
- * - Execution timings and memory metrics
+ * - Wall-clock timings and pixel metrics JSON
+ * - Bundled v1.7_matting_visual_review.zip archive
  */
 
 import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
+import JSZip from 'jszip';
 import {
   generateTrimap,
   computeUnknownBandRoi,
   solveGuidedAlphaMatte,
-  refineContinuousConfidence,
   decontaminateEdgeColor,
   refinePhotoAlphaMatte,
 } from '../src/core/photoMatting';
 import { refineArtworkAlpha } from '../src/core/artworkAlphaRefinement';
 import { mergeAttachedAccessories } from '../src/core/accessoryAttacher';
-import { composePhotoCutout } from '../src/core/photoAdapter';
 import { BoundingBox } from '../src/types/index';
 
 const require = createRequire(import.meta.url);
@@ -42,27 +44,30 @@ fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 fs.mkdirSync(path.join(OUTPUT_DIR, 'crops_400'), { recursive: true });
 fs.mkdirSync(path.join(OUTPUT_DIR, 'contact_sheets'), { recursive: true });
 fs.mkdirSync(path.join(OUTPUT_DIR, 'debug'), { recursive: true });
+fs.mkdirSync(path.join(OUTPUT_DIR, 'full_exports'), { recursive: true });
+fs.mkdirSync(path.join(OUTPUT_DIR, 'backdrops'), { recursive: true });
 
-interface BenchmarkMetric {
+export interface BenchmarkMetric {
   portraitName: string;
   width: number;
   height: number;
-  candidateA: {
+  fast: {
     durationMs: number;
     fractionalPixels: number;
     fractionalPercent: number;
   };
-  candidateB: {
+  better: {
     durationMs: number;
     fractionalPixels: number;
     fractionalPercent: number;
   };
-  candidateC: {
+  best: {
     durationMs: number;
     fractionalPixels: number;
     fractionalPercent: number;
     roiWidth: number;
     roiHeight: number;
+    roiFractionPercent: number;
   };
 }
 
@@ -123,13 +128,13 @@ async function extract400Crop(
 
 /**
  * Creates a 4-way side-by-side comparison image:
- * [ Original Camera | Candidate A (Baseline) | Candidate B (Confidence) | Candidate C (Matting) ]
+ * [ ORIGINAL PHOTO | FAST (V1.6) | BETTER (GUIDED MATTE) | BEST (MATTE + DECONTAM) ]
  */
 async function create4WayComparison(
   origBuffer: Buffer,
-  aBuffer: Buffer,
-  bBuffer: Buffer,
-  cBuffer: Buffer,
+  fastBuffer: Buffer,
+  betterBuffer: Buffer,
+  bestBuffer: Buffer,
   label: string
 ): Promise<Buffer> {
   const meta = await sharp(origBuffer).metadata();
@@ -144,10 +149,10 @@ async function create4WayComparison(
   const svgBanner = `
     <svg width="${totalW}" height="${headerHeight}">
       <rect width="100%" height="100%" fill="#0f172a" />
-      <text x="${w * 0.5}" y="25" fill="#94a3b8" font-size="16" font-family="sans-serif" font-weight="bold" text-anchor="middle">ORIGINAL PHOTO</text>
-      <text x="${w + gutter + w * 0.5}" y="25" fill="#f87171" font-size="16" font-family="sans-serif" font-weight="bold" text-anchor="middle">CANDIDATE A: BASELINE (V1.6)</text>
-      <text x="${(w + gutter) * 2 + w * 0.5}" y="25" fill="#fbbf24" font-size="16" font-family="sans-serif" font-weight="bold" text-anchor="middle">CANDIDATE B: CONTINUOUS CONF</text>
-      <text x="${(w + gutter) * 3 + w * 0.5}" y="25" fill="#38bdf8" font-size="16" font-family="sans-serif" font-weight="bold" text-anchor="middle">CANDIDATE C: GUIDED MATTING (V1.7)</text>
+      <text x="${w * 0.5}" y="25" fill="#94a3b8" font-size="15" font-family="sans-serif" font-weight="bold" text-anchor="middle">ORIGINAL PHOTO</text>
+      <text x="${w + gutter + w * 0.5}" y="25" fill="#f87171" font-size="15" font-family="sans-serif" font-weight="bold" text-anchor="middle">FAST (V1.6 BASELINE)</text>
+      <text x="${(w + gutter) * 2 + w * 0.5}" y="25" fill="#fbbf24" font-size="15" font-family="sans-serif" font-weight="bold" text-anchor="middle">BETTER (GUIDED MATTE)</text>
+      <text x="${(w + gutter) * 3 + w * 0.5}" y="25" fill="#38bdf8" font-size="15" font-family="sans-serif" font-weight="bold" text-anchor="middle">BEST (MATTE + DECONTAM)</text>
     </svg>
   `;
 
@@ -164,101 +169,27 @@ async function create4WayComparison(
     .composite([
       { input: Buffer.from(svgBanner), left: 0, top: 0 },
       { input: origBuffer, left: 0, top: headerHeight },
-      { input: aBuffer, left: w + gutter, top: headerHeight },
-      { input: bBuffer, left: (w + gutter) * 2, top: headerHeight },
-      { input: cBuffer, left: (w + gutter) * 3, top: headerHeight },
+      { input: fastBuffer, left: w + gutter, top: headerHeight },
+      { input: betterBuffer, left: (w + gutter) * 2, top: headerHeight },
+      { input: bestBuffer, left: (w + gutter) * 3, top: headerHeight },
     ])
     .png()
     .toBuffer();
 }
 
 /**
- * Creates a synthetic high-resolution attached red flower accessory on woman_portrait.jpg
- */
-async function createCompoundWomanFlowerPortrait(): Promise<{
-  imageBuffer: Buffer;
-  rgba: Uint8ClampedArray;
-  width: number;
-  height: number;
-  flowerBox: BoundingBox;
-}> {
-  const womanPath = path.join(PORTRAITS_DIR, 'woman_portrait.jpg');
-  const baseImg = sharp(womanPath);
-  const meta = await baseImg.metadata();
-  const width = meta.width!;
-  const height = meta.height!;
-
-  const raw = await baseImg.ensureAlpha().raw().toBuffer();
-  const rgba = new Uint8ClampedArray(raw);
-
-  // Position of red flower accessory: near temple / upper hair on right side [x: ~250..320, y: ~90..160]
-  // In woman_portrait (usually ~400x500 or ~800x1000):
-  const fx = Math.round(width * 0.62);
-  const fy = Math.round(height * 0.22);
-  const fRadius = Math.round(width * 0.08);
-
-  const flowerBox: BoundingBox = {
-    x: fx - fRadius,
-    y: fy - fRadius,
-    width: fRadius * 2,
-    height: fRadius * 2,
-  };
-
-  // Draw vibrant organic red flower petals with yellow center
-  for (let dy = -fRadius; dy <= fRadius; dy++) {
-    const py = fy + dy;
-    if (py < 0 || py >= height) continue;
-    for (let dx = -fRadius; dx <= fRadius; dx++) {
-      const px = fx + dx;
-      if (px < 0 || px >= width) continue;
-
-      const d = Math.sqrt(dx * dx + dy * dy);
-      const angle = Math.atan2(dy, dx);
-      // 5-petal flower shape: r(theta) = R * (0.8 + 0.2 * cos(5 * theta))
-      const petalR = fRadius * (0.8 + 0.2 * Math.cos(5 * angle));
-
-      if (d <= petalR) {
-        const idx = (py * width + px) * 4;
-        if (d < fRadius * 0.28) {
-          // Yellow center
-          rgba[idx] = 250;
-          rgba[idx + 1] = 210;
-          rgba[idx + 2] = 40;
-        } else {
-          // Vibrant crimson red petals with subtle shading
-          const shade = 1.0 - (d / fRadius) * 0.3;
-          rgba[idx] = Math.round(225 * shade);
-          rgba[idx + 1] = Math.round(30 * shade);
-          rgba[idx + 2] = Math.round(45 * shade);
-        }
-        rgba[idx + 3] = 255;
-      }
-    }
-  }
-
-  const imageBuffer = await sharp(Buffer.from(rgba.buffer), {
-    raw: { width, height, channels: 4 },
-  }).png().toBuffer();
-
-  return { imageBuffer, rgba, width, height, flowerBox };
-}
-
-/**
- * Loads real MediaPipe coarse segmentation prior and continuous confidence map from disk,
- * extracted via real MediaPipe vision tasks in headless browser.
+ * Loads real MediaPipe coarse segmentation prior and continuous confidence map from disk.
+ * 100% genuine model output — zero manual confidence injection.
  */
 function loadMediaPipePrior(
   fixtureName: string,
-  rgba: Uint8ClampedArray,
   width: number,
-  height: number,
-  accessoryBox?: BoundingBox
+  height: number
 ): { coarseMask: Uint8Array; confidenceMap: Float32Array; coreBox: BoundingBox } {
   const size = width * height;
   const priorDir = path.resolve('docs/v1.7_matting_investigation/real_priors');
-  const baseName = fixtureName === 'compound_woman_red_flower' ? 'woman_portrait' : fixtureName;
-  const maskPath = path.join(priorDir, `${baseName}_mask.raw`);
-  const confPath = path.join(priorDir, `${baseName}_conf.raw`);
+  const maskPath = path.join(priorDir, `${fixtureName}_mask.raw`);
+  const confPath = path.join(priorDir, `${fixtureName}_conf.raw`);
 
   let coarseMask = new Uint8Array(size);
   let confidenceMap = new Float32Array(size);
@@ -272,23 +203,8 @@ function loadMediaPipePrior(
     if (rawConf.byteLength === size * 4) {
       confidenceMap = new Float32Array(rawConf.buffer, rawConf.byteOffset, size);
     }
-  }
-
-  // If accessory exists, add accessory pixels to coarse mask and confidence map
-  if (accessoryBox) {
-    for (let y = accessoryBox.y; y < accessoryBox.y + accessoryBox.height; y++) {
-      for (let x = accessoryBox.x; x < accessoryBox.x + accessoryBox.width; x++) {
-        const idx = y * width + x;
-        const off = idx * 4;
-        const r = rgba[off];
-        const g = rgba[off + 1];
-        const b = rgba[off + 2];
-        if (r > 150 && g < 100 && b < 100) {
-          coarseMask[idx] = 1;
-          confidenceMap[idx] = 0.95;
-        }
-      }
-    }
+  } else {
+    throw new Error(`Real MediaPipe priors not found for ${fixtureName} at ${priorDir}`);
   }
 
   // Calculate subject core box from mask
@@ -319,285 +235,244 @@ function loadMediaPipePrior(
  */
 async function runMattingBenchmark() {
   console.log('================================================================');
-  console.log('STICKER STUDIO V1.7 — PHOTO EXTRACTION ALGORITHM BENCHMARK');
-  console.log('================================================================');
-  console.log(`Portraits Source: ${PORTRAITS_DIR}`);
-  console.log(`Output Directory: ${OUTPUT_DIR}\n`);
+  console.log('STICKER STUDIO V1.7 — REAL PHOTO MATTING QUALITY BENCHMARK');
+  console.log('================================================================\n');
 
-  // Fixture list
-  const fixtures: Array<{
-    name: string;
-    load: () => Promise<{
-      imageBuffer: Buffer;
-      rgba: Uint8ClampedArray;
-      width: number;
-      height: number;
-      cropHair: BoundingBox;
-      cropDiagonal: BoundingBox;
-      cropAccessory?: BoundingBox;
-    }>;
-  }> = [
+  const fixtures = [
     {
       name: 'woman_portrait',
-      load: async () => {
-        const p = path.join(PORTRAITS_DIR, 'woman_portrait.jpg');
-        const raw = await sharp(p).ensureAlpha().raw().toBuffer();
-        const meta = await sharp(p).metadata();
-        const w = meta.width!;
-        const h = meta.height!;
-        return {
-          imageBuffer: await sharp(p).png().toBuffer(),
-          rgba: new Uint8ClampedArray(raw),
-          width: w,
-          height: h,
-          cropHair: { x: Math.round(w * 0.15), y: Math.round(h * 0.12), width: 70, height: 70 },
-          cropDiagonal: { x: Math.round(w * 0.08), y: Math.round(h * 0.65), width: 70, height: 70 },
-        };
-      },
+      file: path.join(PORTRAITS_DIR, 'woman_portrait.jpg'),
+      cropHair: { x: 340, y: 80, width: 70, height: 70 },
+      cropDiagonal: { x: 190, y: 550, width: 70, height: 70 },
     },
     {
       name: 'leather_jacket_portrait',
-      load: async () => {
-        const p = path.join(PORTRAITS_DIR, 'leather_jacket_portrait.jpg');
-        const raw = await sharp(p).ensureAlpha().raw().toBuffer();
-        const meta = await sharp(p).metadata();
-        const w = meta.width!;
-        const h = meta.height!;
-        return {
-          imageBuffer: await sharp(p).png().toBuffer(),
-          rgba: new Uint8ClampedArray(raw),
-          width: w,
-          height: h,
-          cropHair: { x: Math.round(w * 0.42), y: Math.round(h * 0.08), width: 70, height: 70 },
-          cropDiagonal: { x: Math.round(w * 0.18), y: Math.round(h * 0.55), width: 70, height: 70 },
-        };
-      },
+      file: path.join(PORTRAITS_DIR, 'leather_jacket_portrait.jpg'),
+      cropHair: { x: 200, y: 50, width: 70, height: 70 },
+      cropDiagonal: { x: 80, y: 440, width: 70, height: 70 },
     },
     {
       name: 'alex_pretti_glasses',
-      load: async () => {
-        const p = path.join(PORTRAITS_DIR, 'alex_pretti_glasses.jpg');
-        const raw = await sharp(p).ensureAlpha().raw().toBuffer();
-        const meta = await sharp(p).metadata();
-        const w = meta.width!;
-        const h = meta.height!;
-        return {
-          imageBuffer: await sharp(p).png().toBuffer(),
-          rgba: new Uint8ClampedArray(raw),
-          width: w,
-          height: h,
-          cropHair: { x: Math.round(w * 0.35), y: Math.round(h * 0.08), width: 70, height: 70 },
-          cropDiagonal: { x: Math.round(w * 0.22), y: Math.round(h * 0.48), width: 70, height: 70 },
-        };
-      },
+      file: path.join(PORTRAITS_DIR, 'alex_pretti_glasses.jpg'),
+      cropHair: { x: 380, y: 120, width: 70, height: 70 },
+      cropDiagonal: { x: 220, y: 700, width: 70, height: 70 },
     },
     {
       name: 'compound_woman_red_flower',
-      load: async () => {
-        const res = await createCompoundWomanFlowerPortrait();
-        return {
-          imageBuffer: res.imageBuffer,
-          rgba: res.rgba,
-          width: res.width,
-          height: res.height,
-          cropHair: { x: Math.round(res.width * 0.15), y: Math.round(res.height * 0.12), width: 70, height: 70 },
-          cropDiagonal: { x: Math.round(res.width * 0.08), y: Math.round(res.height * 0.65), width: 70, height: 70 },
-          cropAccessory: {
-            x: Math.max(0, res.flowerBox.x - 10),
-            y: Math.max(0, res.flowerBox.y - 10),
-            width: res.flowerBox.width + 20,
-            height: res.flowerBox.height + 20,
-          },
-        };
-      },
+      file: path.join(PORTRAITS_DIR, 'compound_woman_red_flower.png'),
+      cropHair: { x: 340, y: 80, width: 70, height: 70 },
+      cropDiagonal: { x: 190, y: 550, width: 70, height: 70 },
+      cropAccessory: { x: 440, y: 160, width: 140, height: 140 },
     },
   ];
 
   for (const fixture of fixtures) {
     console.log(`\nEvaluating Portrait: [${fixture.name}]...`);
-    const loaded = await fixture.load();
-    const { imageBuffer, rgba, width, height, cropHair, cropDiagonal, cropAccessory } = loaded;
+    const imgSharp = sharp(fixture.file);
+    const meta = await imgSharp.metadata();
+    const width = meta.width!;
+    const height = meta.height!;
+    const rawRgba = await imgSharp.ensureAlpha().raw().toBuffer();
+    const rgba = new Uint8ClampedArray(rawRgba);
+    const origBuffer = await imgSharp.png().toBuffer();
 
-    // Load real MediaPipe prior
-    const { coarseMask, confidenceMap, coreBox } = loadMediaPipePrior(fixture.name, rgba, width, height, cropAccessory);
+    // 1. Load genuine MediaPipe prior (no manual confidence injection)
+    const { coarseMask, confidenceMap, coreBox } = loadMediaPipePrior(fixture.name, width, height);
 
-    // Merge accessories
+    // 2. Accessory attachment (evaluates head zone candidates without artificial bridges)
     const merged = mergeAttachedAccessories(coarseMask, width, height, coreBox, {
+      protectedBoxes: [coreBox],
+      confidenceMap,
       maxAttachmentDistance: 16,
       headZoneRatio: 0.65,
     });
     const effectiveMask = merged.mask;
 
     // -------------------------------------------------------------------------
-    // CANDIDATE A: Baseline V1.6 (Binary + Distance Transform Smoothing)
+    // FAST MODE: Baseline V1.6 (Distance Transform Smoothing, no guided solver)
     // -------------------------------------------------------------------------
-    const startA = performance.now();
-    const alphaA = refineArtworkAlpha(effectiveMask, width, height, 2, 0.5);
-    const durationA = performance.now() - startA;
+    const tFast0 = performance.now();
+    const alphaFast = refineArtworkAlpha(effectiveMask, width, height, 2, 0.5);
+    const durationFast = performance.now() - tFast0;
 
-    const rgbaA = new Uint8ClampedArray(rgba);
-    let fracA = 0;
+    const rgbaFast = new Uint8ClampedArray(rgba);
+    let fracFast = 0;
     for (let i = 0; i < width * height; i++) {
-      const a = alphaA[i];
-      rgbaA[i * 4 + 3] = a;
-      if (a > 0 && a < 255) fracA++;
+      const a = alphaFast[i];
+      rgbaFast[i * 4 + 3] = a;
+      if (a > 0 && a < 255) fracFast++;
     }
 
     // -------------------------------------------------------------------------
-    // CANDIDATE B: Preserved Confidence + Joint RGB-Guided Upsampling
+    // BETTER MODE: Guided RGB Matting (No Decontamination)
     // -------------------------------------------------------------------------
-    const startB = performance.now();
-    const alphaB = refineContinuousConfidence(rgba, confidenceMap, width, height, 5, 1e-3);
-    const durationB = performance.now() - startB;
+    const tBetter0 = performance.now();
+    const mattingBetter = refinePhotoAlphaMatte(rgba, effectiveMask, width, height, {
+      qualityMode: 'better',
+      decontaminateEdge: false,
+      hairDetail: 5,
+      confidenceMap,
+    });
+    const durationBetter = performance.now() - tBetter0;
+    const alphaBetter = mattingBetter.alpha;
 
-    const rgbaB = new Uint8ClampedArray(rgba);
-    let fracB = 0;
+    const rgbaBetter = new Uint8ClampedArray(rgba);
+    let fracBetter = 0;
     for (let i = 0; i < width * height; i++) {
-      const a = alphaB[i];
-      rgbaB[i * 4 + 3] = a;
-      if (a > 0 && a < 255) fracB++;
+      const a = alphaBetter[i];
+      rgbaBetter[i * 4 + 3] = a;
+      if (a > 0 && a < 255) fracBetter++;
     }
 
     // -------------------------------------------------------------------------
-    // CANDIDATE C: Narrow-ROI Trimap + Guided Alpha Matting + Guarded Decontamination
+    // BEST MODE: Guided RGB Matting + Guarded Edge Color Decontamination
     // -------------------------------------------------------------------------
-    const startC = performance.now();
-    const trimapC = generateTrimap(effectiveMask, width, height, { hairDetail: 5 });
-    const roiC = computeUnknownBandRoi(trimapC, width, height, 8);
-    const alphaC = solveGuidedAlphaMatte(rgba, effectiveMask, trimapC, width, height, 6, 1e-4);
-    const decontamC = decontaminateEdgeColor(rgba, alphaC, trimapC, width, height, 6);
-    const durationC = performance.now() - startC;
+    const tBest0 = performance.now();
+    const mattingBest = refinePhotoAlphaMatte(rgba, effectiveMask, width, height, {
+      qualityMode: 'best',
+      decontaminateEdge: true,
+      hairDetail: 5,
+      confidenceMap,
+    });
+    const durationBest = performance.now() - tBest0;
+    const alphaBest = mattingBest.alpha;
+    const decontamRgba = mattingBest.decontaminatedRgba ?? rgba;
 
-    let fracC = 0;
+    const rgbaBest = new Uint8ClampedArray(decontamRgba);
+    let fracBest = 0;
     for (let i = 0; i < width * height; i++) {
-      const a = alphaC[i];
-      if (a > 0 && a < 255) fracC++;
+      const a = alphaBest[i];
+      rgbaBest[i * 4 + 3] = a;
+      if (a > 0 && a < 255) fracBest++;
     }
+
+    const roi = mattingBest.roi ?? { x: 0, y: 0, width, height };
+    const roiArea = roi.width * roi.height;
+    const totalArea = width * height;
 
     const metric: BenchmarkMetric = {
       portraitName: fixture.name,
       width,
       height,
-      candidateA: {
-        durationMs: Number(durationA.toFixed(2)),
-        fractionalPixels: fracA,
-        fractionalPercent: Number(((fracA / (width * height)) * 100).toFixed(2)),
+      fast: {
+        durationMs: Number(durationFast.toFixed(2)),
+        fractionalPixels: fracFast,
+        fractionalPercent: Number(((fracFast / totalArea) * 100).toFixed(2)),
       },
-      candidateB: {
-        durationMs: Number(durationB.toFixed(2)),
-        fractionalPixels: fracB,
-        fractionalPercent: Number(((fracB / (width * height)) * 100).toFixed(2)),
+      better: {
+        durationMs: Number(durationBetter.toFixed(2)),
+        fractionalPixels: fracBetter,
+        fractionalPercent: Number(((fracBetter / totalArea) * 100).toFixed(2)),
       },
-      candidateC: {
-        durationMs: Number(durationC.toFixed(2)),
-        fractionalPixels: fracC,
-        fractionalPercent: Number(((fracC / (width * height)) * 100).toFixed(2)),
-        roiWidth: roiC.width,
-        roiHeight: roiC.height,
+      best: {
+        durationMs: Number(durationBest.toFixed(2)),
+        fractionalPixels: fracBest,
+        fractionalPercent: Number(((fracBest / totalArea) * 100).toFixed(2)),
+        roiWidth: roi.width,
+        roiHeight: roi.height,
+        roiFractionPercent: Number(((roiArea / totalArea) * 100).toFixed(2)),
       },
     };
     metricsLedger.push(metric);
 
-    console.log(`  Candidate A (Baseline):    ${durationA.toFixed(1)} ms | Frac Alpha: ${fracA} px (${metric.candidateA.fractionalPercent}%)`);
-    console.log(`  Candidate B (Confidence):  ${durationB.toFixed(1)} ms | Frac Alpha: ${fracB} px (${metric.candidateB.fractionalPercent}%)`);
-    console.log(`  Candidate C (Guided Matte):${durationC.toFixed(1)} ms | Frac Alpha: ${fracC} px (${metric.candidateC.fractionalPercent}%) | ROI: ${roiC.width}x${roiC.height}`);
+    console.log(`  Fast (V1.6 Baseline):       ${durationFast.toFixed(1)} ms | Frac Alpha: ${fracFast} px (${metric.fast.fractionalPercent}%)`);
+    console.log(`  Better (Guided Matte):     ${durationBetter.toFixed(1)} ms | Frac Alpha: ${fracBetter} px (${metric.better.fractionalPercent}%)`);
+    console.log(`  Best (Matte + Decontam):   ${durationBest.toFixed(1)} ms | Frac Alpha: ${fracBest} px (${metric.best.fractionalPercent}%) | ROI: ${roi.width}x${roi.height} (${metric.best.roiFractionPercent}% frame)`);
 
-    // Save full artwork PNGs
-    const aPng = await sharp(Buffer.from(rgbaA.buffer), { raw: { width, height, channels: 4 } }).png().toBuffer();
-    const bPng = await sharp(Buffer.from(rgbaB.buffer), { raw: { width, height, channels: 4 } }).png().toBuffer();
-    const cPng = await sharp(Buffer.from(decontamC.buffer), { raw: { width, height, channels: 4 } }).png().toBuffer();
+    // Save full artwork exports
+    const fastPng = await sharp(Buffer.from(rgbaFast.buffer), { raw: { width, height, channels: 4 } }).png().toBuffer();
+    const betterPng = await sharp(Buffer.from(rgbaBetter.buffer), { raw: { width, height, channels: 4 } }).png().toBuffer();
+    const bestPng = await sharp(Buffer.from(rgbaBest.buffer), { raw: { width, height, channels: 4 } }).png().toBuffer();
 
-    fs.writeFileSync(path.join(OUTPUT_DIR, `${fixture.name}_candA_artwork.png`), aPng);
-    fs.writeFileSync(path.join(OUTPUT_DIR, `${fixture.name}_candB_artwork.png`), bPng);
-    fs.writeFileSync(path.join(OUTPUT_DIR, `${fixture.name}_candC_artwork.png`), cPng);
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'full_exports', `${fixture.name}_fast_export.png`), fastPng);
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'full_exports', `${fixture.name}_better_export.png`), betterPng);
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'full_exports', `${fixture.name}_best_export.png`), bestPng);
 
-    // Save Alpha & Trimap debug images
-    const alphaC_rgba = new Uint8ClampedArray(width * height * 4);
-    const trimapC_rgba = new Uint8ClampedArray(width * height * 4);
+    // Save Alpha Matte & Trimap grayscale PNGs
+    const alphaBestGrayscale = new Uint8ClampedArray(width * height * 4);
+    const trimapBestGrayscale = new Uint8ClampedArray(width * height * 4);
     for (let i = 0; i < width * height; i++) {
-      const aVal = alphaC[i];
-      const tVal = trimapC[i];
-      alphaC_rgba[i * 4] = aVal;
-      alphaC_rgba[i * 4 + 1] = aVal;
-      alphaC_rgba[i * 4 + 2] = aVal;
-      alphaC_rgba[i * 4 + 3] = 255;
+      const a = alphaBest[i];
+      const t = mattingBest.trimap[i];
+      const s = i * 4;
+      alphaBestGrayscale[s] = a;
+      alphaBestGrayscale[s + 1] = a;
+      alphaBestGrayscale[s + 2] = a;
+      alphaBestGrayscale[s + 3] = 255;
 
-      trimapC_rgba[i * 4] = tVal;
-      trimapC_rgba[i * 4 + 1] = tVal;
-      trimapC_rgba[i * 4 + 2] = tVal;
-      trimapC_rgba[i * 4 + 3] = 255;
+      trimapBestGrayscale[s] = t;
+      trimapBestGrayscale[s + 1] = t;
+      trimapBestGrayscale[s + 2] = t;
+      trimapBestGrayscale[s + 3] = 255;
     }
-    await sharp(Buffer.from(alphaC_rgba.buffer), { raw: { width, height, channels: 4 } })
+
+    await sharp(Buffer.from(alphaBestGrayscale.buffer), { raw: { width, height, channels: 4 } })
       .png()
       .toFile(path.join(OUTPUT_DIR, 'debug', `${fixture.name}_alpha_matte.png`));
-    await sharp(Buffer.from(trimapC_rgba.buffer), { raw: { width, height, channels: 4 } })
+
+    await sharp(Buffer.from(trimapBestGrayscale.buffer), { raw: { width, height, channels: 4 } })
       .png()
       .toFile(path.join(OUTPUT_DIR, 'debug', `${fixture.name}_trimap.png`));
 
-    // Generate 4-Way Comparison Contact Sheet
-    const sheetBuffer = await create4WayComparison(imageBuffer, aPng, bPng, cPng, fixture.name);
-    fs.writeFileSync(path.join(OUTPUT_DIR, 'contact_sheets', `${fixture.name}_4way_comparison.png`), sheetBuffer);
-
-    // Save to artifact dir as well
-    fs.writeFileSync(path.join(ARTIFACT_DIR, `${fixture.name}_4way_comparison.png`), sheetBuffer);
+    // Save 4-Way Comparison Contact Sheet
+    const contactSheetBuffer = await create4WayComparison(origBuffer, fastPng, betterPng, bestPng, fixture.name);
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'contact_sheets', `${fixture.name}_4way_comparison.png`), contactSheetBuffer);
+    fs.writeFileSync(path.join(ARTIFACT_DIR, `${fixture.name}_4way_comparison.png`), contactSheetBuffer);
 
     // Generate 400% Zoom Crops
     // Crop 1: Hair
-    const cropHairOrig = await extract400Crop(rgba, width, height, cropHair);
-    const cropHairA = await extract400Crop(rgbaA, width, height, cropHair);
-    const cropHairB = await extract400Crop(rgbaB, width, height, cropHair);
-    const cropHairC = await extract400Crop(decontamC, width, height, cropHair);
+    const cropHairOrig = await extract400Crop(rgba, width, height, fixture.cropHair);
+    const cropHairFast = await extract400Crop(rgbaFast, width, height, fixture.cropHair);
+    const cropHairBetter = await extract400Crop(rgbaBetter, width, height, fixture.cropHair);
+    const cropHairBest = await extract400Crop(rgbaBest, width, height, fixture.cropHair);
+    const hairSheet = await create4WayComparison(cropHairOrig, cropHairFast, cropHairBetter, cropHairBest, `${fixture.name}_hair_400x`);
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'crops_400', `${fixture.name}_hair_crop_400.png`), hairSheet);
+    fs.writeFileSync(path.join(ARTIFACT_DIR, `${fixture.name}_hair_crop_400.png`), hairSheet);
 
-    const hairCropSheet = await create4WayComparison(cropHairOrig, cropHairA, cropHairB, cropHairC, `${fixture.name}_hair_400x`);
-    fs.writeFileSync(path.join(OUTPUT_DIR, 'crops_400', `${fixture.name}_hair_crop_400.png`), hairCropSheet);
-    fs.writeFileSync(path.join(ARTIFACT_DIR, `${fixture.name}_hair_crop_400.png`), hairCropSheet);
-
-    // Crop 2: Diagonal clothing
-    const cropDiagOrig = await extract400Crop(rgba, width, height, cropDiagonal);
-    const cropDiagA = await extract400Crop(rgbaA, width, height, cropDiagonal);
-    const cropDiagB = await extract400Crop(rgbaB, width, height, cropDiagonal);
-    const cropDiagC = await extract400Crop(decontamC, width, height, cropDiagonal);
-
-    const diagCropSheet = await create4WayComparison(cropDiagOrig, cropDiagA, cropDiagB, cropDiagC, `${fixture.name}_diagonal_400x`);
-    fs.writeFileSync(path.join(OUTPUT_DIR, 'crops_400', `${fixture.name}_diagonal_crop_400.png`), diagCropSheet);
-    fs.writeFileSync(path.join(ARTIFACT_DIR, `${fixture.name}_diagonal_crop_400.png`), diagCropSheet);
+    // Crop 2: Diagonal contour
+    const cropDiagOrig = await extract400Crop(rgba, width, height, fixture.cropDiagonal);
+    const cropDiagFast = await extract400Crop(rgbaFast, width, height, fixture.cropDiagonal);
+    const cropDiagBetter = await extract400Crop(rgbaBetter, width, height, fixture.cropDiagonal);
+    const cropDiagBest = await extract400Crop(rgbaBest, width, height, fixture.cropDiagonal);
+    const diagSheet = await create4WayComparison(cropDiagOrig, cropDiagFast, cropDiagBetter, cropDiagBest, `${fixture.name}_diagonal_400x`);
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'crops_400', `${fixture.name}_diagonal_crop_400.png`), diagSheet);
+    fs.writeFileSync(path.join(ARTIFACT_DIR, `${fixture.name}_diagonal_crop_400.png`), diagSheet);
 
     // Crop 3: Accessory (if present)
-    if (cropAccessory) {
-      const cropAccOrig = await extract400Crop(rgba, width, height, cropAccessory);
-      const cropAccA = await extract400Crop(rgbaA, width, height, cropAccessory);
-      const cropAccB = await extract400Crop(rgbaB, width, height, cropAccessory);
-      const cropAccC = await extract400Crop(decontamC, width, height, cropAccessory);
-
-      const accCropSheet = await create4WayComparison(cropAccOrig, cropAccA, cropAccB, cropAccC, `${fixture.name}_accessory_400x`);
-      fs.writeFileSync(path.join(OUTPUT_DIR, 'crops_400', `${fixture.name}_accessory_crop_400.png`), accCropSheet);
-      fs.writeFileSync(path.join(ARTIFACT_DIR, `${fixture.name}_accessory_crop_400.png`), accCropSheet);
+    if (fixture.cropAccessory) {
+      const cropAccOrig = await extract400Crop(rgba, width, height, fixture.cropAccessory);
+      const cropAccFast = await extract400Crop(rgbaFast, width, height, fixture.cropAccessory);
+      const cropAccBetter = await extract400Crop(rgbaBetter, width, height, fixture.cropAccessory);
+      const cropAccBest = await extract400Crop(rgbaBest, width, height, fixture.cropAccessory);
+      const accSheet = await create4WayComparison(cropAccOrig, cropAccFast, cropAccBetter, cropAccBest, `${fixture.name}_accessory_400x`);
+      fs.writeFileSync(path.join(OUTPUT_DIR, 'crops_400', `${fixture.name}_accessory_crop_400.png`), accSheet);
+      fs.writeFileSync(path.join(ARTIFACT_DIR, `${fixture.name}_accessory_crop_400.png`), accSheet);
     }
 
-    // Multi-background inspection previews for Candidate C
+    // Multi-background inspection previews for BEST mode:
     // 1. Black
-    const onBlack = compositeOnBackground(decontamC, width, height, 15, 23, 42);
+    const onBlack = compositeOnBackground(rgbaBest, width, height, 0, 0, 0);
     await sharp(Buffer.from(onBlack.buffer), { raw: { width, height, channels: 4 } })
       .png()
-      .toFile(path.join(OUTPUT_DIR, `${fixture.name}_candC_on_dark.png`));
+      .toFile(path.join(OUTPUT_DIR, 'backdrops', `${fixture.name}_best_on_black.png`));
 
     // 2. White
-    const onWhite = compositeOnBackground(decontamC, width, height, 255, 255, 255);
+    const onWhite = compositeOnBackground(rgbaBest, width, height, 255, 255, 255);
     await sharp(Buffer.from(onWhite.buffer), { raw: { width, height, channels: 4 } })
       .png()
-      .toFile(path.join(OUTPUT_DIR, `${fixture.name}_candC_on_white.png`));
+      .toFile(path.join(OUTPUT_DIR, 'backdrops', `${fixture.name}_best_on_white.png`));
 
     // 3. Neutral Grey
-    const onGrey = compositeOnBackground(decontamC, width, height, 115, 115, 115);
+    const onGrey = compositeOnBackground(rgbaBest, width, height, 128, 128, 128);
     await sharp(Buffer.from(onGrey.buffer), { raw: { width, height, channels: 4 } })
       .png()
-      .toFile(path.join(OUTPUT_DIR, `${fixture.name}_candC_on_grey.png`));
+      .toFile(path.join(OUTPUT_DIR, 'backdrops', `${fixture.name}_best_on_grey.png`));
 
     // 4. Vibrant Cyan
-    const onCyan = compositeOnBackground(decontamC, width, height, 6, 182, 212);
+    const onCyan = compositeOnBackground(rgbaBest, width, height, 0, 255, 255);
     await sharp(Buffer.from(onCyan.buffer), { raw: { width, height, channels: 4 } })
       .png()
-      .toFile(path.join(OUTPUT_DIR, `${fixture.name}_candC_on_vibrant.png`));
+      .toFile(path.join(OUTPUT_DIR, 'backdrops', `${fixture.name}_best_on_cyan.png`));
   }
 
   // Write Benchmark Metrics JSON
@@ -605,9 +480,33 @@ async function runMattingBenchmark() {
   fs.writeFileSync(path.join(OUTPUT_DIR, 'matting_benchmark_metrics.json'), metricsJson);
   fs.writeFileSync(path.join(ARTIFACT_DIR, 'matting_benchmark_metrics.json'), metricsJson);
 
-  console.log('\n================================================================');
+  // Bundle entire investigation directory into single review ZIP
+  console.log('\nPackaging visual review deliverables into v1.7_matting_visual_review.zip...');
+  const zip = new JSZip();
+
+  function addDirToZip(zipFolder: JSZip, localDir: string) {
+    const entries = fs.readdirSync(localDir);
+    for (const entry of entries) {
+      const fullPath = path.join(localDir, entry);
+      const stat = fs.statSync(fullPath);
+      if (stat.isDirectory()) {
+        const sub = zipFolder.folder(entry);
+        if (sub) addDirToZip(sub, fullPath);
+      } else if (!entry.endsWith('.zip')) {
+        zipFolder.file(entry, fs.readFileSync(fullPath));
+      }
+    }
+  }
+
+  addDirToZip(zip, OUTPUT_DIR);
+  const zipContent = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+  const zipPath = path.join(OUTPUT_DIR, 'v1.7_matting_visual_review.zip');
+  fs.writeFileSync(zipPath, zipContent);
+  fs.writeFileSync(path.join(ARTIFACT_DIR, 'v1.7_matting_visual_review.zip'), zipContent);
+
+  console.log(`Review ZIP generated: ${zipPath} (${(zipContent.byteLength / (1024 * 1024)).toFixed(2)} MB)`);
+  console.log('================================================================');
   console.log('MATTING QUALITY BENCHMARK COMPLETED SUCCESSFULLY');
-  console.log(`Metrics written to: ${path.join(OUTPUT_DIR, 'matting_benchmark_metrics.json')}`);
   console.log('================================================================\n');
 }
 

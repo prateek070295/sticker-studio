@@ -107,6 +107,7 @@ export interface SerializedPersonRegion {
   isUncertain?: boolean;
   cropBounds?: BoundingBox;
   maskData?: string; // Base64 RLE or mask identifier
+  confidenceData?: string; // Base64 raw Float32Array bytes
 }
 export type ToolMode =
   | 'select'
@@ -243,6 +244,9 @@ export interface ProjectMetadata {
     decontaminateEdge?: boolean;
     hairDetail?: number;
     accessoryMerge?: boolean;
+    fallbackConfidence?: string; // Base64 raw Float32Array bytes for single-pass segmentation
+    alphaMatteData?: string; // Base64 resolved artwork alpha mask (1 byte/px)
+    decontaminatedData?: string; // Base64 decontaminated RGBA
   };
 }
 

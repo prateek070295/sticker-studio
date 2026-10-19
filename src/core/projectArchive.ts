@@ -65,6 +65,9 @@ export interface ProjectSaveState {
     decontaminateEdge?: boolean;
     hairDetail?: number;
     accessoryMerge?: boolean;
+    fallbackConfidence?: string;
+    alphaMatteData?: string;
+    decontaminatedData?: string;
   };
 }
 

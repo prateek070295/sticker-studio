@@ -27,7 +27,10 @@ export interface PhotoFinishingOptions {
   confidenceMap?: Float32Array;
   faceBounds?: BoundingBox;
   primaryRegionBox?: BoundingBox;
+  protectedBoxes?: BoundingBox[];
   manualDelta?: Int8Array | null;
+  precomputedAlphaMatte?: Uint8Array;
+  precomputedDecontaminatedRgb?: Uint8ClampedArray;
 }
 
 export interface PhotoComposedResult {
@@ -42,6 +45,8 @@ export interface PhotoComposedResult {
   bounds: BoundingBox;
   trimap?: Uint8Array;
   mattingDurationMs?: number;
+  alphaMatte?: Uint8Array;
+  decontaminatedRgb?: Uint8ClampedArray;
 }
 
 interface IntermediateMatteResult {
@@ -68,7 +73,10 @@ interface PhotoMatteCacheEntry {
   accessoryMerge: boolean;
   confidenceMapRef?: Float32Array;
   manualDeltaRef?: Int8Array | null;
+  precomputedAlphaMatteRef?: Uint8Array;
+  precomputedDecontaminatedRgbRef?: Uint8ClampedArray;
   primaryBoxKey: string;
+  protectedBoxesKey: string;
   result: IntermediateMatteResult;
 }
 
@@ -132,6 +140,9 @@ export function composePhotoCutout(
 
   const primaryBox = finishingOptions?.primaryRegionBox ?? finishingOptions?.faceBounds ?? initialBounds;
   const primaryBoxKey = `${primaryBox.x},${primaryBox.y},${primaryBox.width},${primaryBox.height}`;
+  const protectedBoxesKey = finishingOptions?.protectedBoxes
+    ? finishingOptions.protectedBoxes.map(b => `${b.x},${b.y},${b.width},${b.height}`).join(';')
+    : '';
   const maskChecksum = mask.length ^ mask[0] ^ mask[mask.length >> 1] ^ mask[mask.length - 1];
 
   const qualityMode = finishingOptions?.qualityMode;
@@ -155,14 +166,20 @@ export function composePhotoCutout(
     lastMatteCache.accessoryMerge === (finishingOptions?.accessoryMerge ?? false) &&
     lastMatteCache.confidenceMapRef === finishingOptions?.confidenceMap &&
     lastMatteCache.manualDeltaRef === finishingOptions?.manualDelta &&
-    lastMatteCache.primaryBoxKey === primaryBoxKey
+    lastMatteCache.precomputedAlphaMatteRef === finishingOptions?.precomputedAlphaMatte &&
+    lastMatteCache.precomputedDecontaminatedRgbRef === finishingOptions?.precomputedDecontaminatedRgb &&
+    lastMatteCache.primaryBoxKey === primaryBoxKey &&
+    lastMatteCache.protectedBoxesKey === protectedBoxesKey
   ) {
     intermediate = lastMatteCache.result;
   } else {
     // 2. Handle Attached Accessories (Hair flowers, clips, earrings)
     let effectiveMask = mask;
     if (finishingOptions?.accessoryMerge) {
-      const merged = mergeAttachedAccessories(mask, sourceWidth, sourceHeight, primaryBox);
+      const merged = mergeAttachedAccessories(mask, sourceWidth, sourceHeight, primaryBox, {
+        protectedBoxes: finishingOptions.protectedBoxes,
+        confidenceMap: finishingOptions.confidenceMap,
+      });
       if (merged.attachedCount > 0) {
         effectiveMask = merged.mask;
       }
@@ -175,7 +192,13 @@ export function composePhotoCutout(
     let trimap: Uint8Array | undefined;
     let mattingDurationMs: number | undefined;
 
-    if (qualityMode === 'better' || qualityMode === 'best' || candidateAlgo === 'candidate-b' || candidateAlgo === 'candidate-c') {
+    if (finishingOptions?.precomputedAlphaMatte && finishingOptions.precomputedAlphaMatte.length === totalPixels) {
+      alphaMask = finishingOptions.precomputedAlphaMatte;
+      if (finishingOptions.precomputedDecontaminatedRgb && finishingOptions.precomputedDecontaminatedRgb.length === sourceRgba.length) {
+        effectiveRgba = finishingOptions.precomputedDecontaminatedRgb;
+      }
+      mattingDurationMs = 0;
+    } else if (qualityMode === 'better' || qualityMode === 'best' || candidateAlgo === 'candidate-b' || candidateAlgo === 'candidate-c') {
       const matting = refinePhotoAlphaMatte(
         sourceRgba,
         effectiveMask,
@@ -271,7 +294,10 @@ export function composePhotoCutout(
       accessoryMerge: finishingOptions?.accessoryMerge ?? false,
       confidenceMapRef: finishingOptions?.confidenceMap,
       manualDeltaRef: finishingOptions?.manualDelta,
+      precomputedAlphaMatteRef: finishingOptions?.precomputedAlphaMatte,
+      precomputedDecontaminatedRgbRef: finishingOptions?.precomputedDecontaminatedRgb,
       primaryBoxKey,
+      protectedBoxesKey,
       result: intermediate,
     };
   }
@@ -382,6 +408,8 @@ export function composePhotoCutout(
     bounds,
     trimap,
     mattingDurationMs,
+    alphaMatte: intermediate.alphaMask,
+    decontaminatedRgb: intermediate.effectiveRgba,
   };
 }
 

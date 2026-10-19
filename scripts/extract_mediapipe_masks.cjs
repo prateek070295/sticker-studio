@@ -32,11 +32,69 @@ function waitForServer(url, timeoutMs = 20000) {
   });
 }
 
+const sharp = require('C:/Users/prate/Documents/pheartp/node_modules/sharp');
+
+async function ensureCompoundFlowerPortrait() {
+  const compoundPath = path.resolve('test-output/actual_portraits/compound_woman_red_flower.png');
+  if (fs.existsSync(compoundPath)) return compoundPath;
+
+  const womanPath = path.resolve('test-output/actual_portraits/woman_portrait.jpg');
+  const baseImg = sharp(womanPath);
+  const meta = await baseImg.metadata();
+  const width = meta.width;
+  const height = meta.height;
+
+  const raw = await baseImg.ensureAlpha().raw().toBuffer();
+  const rgba = new Uint8ClampedArray(raw);
+
+  const fx = Math.round(width * 0.62);
+  const fy = Math.round(height * 0.22);
+  const fRadius = Math.round(width * 0.08);
+
+  for (let dy = -fRadius; dy <= fRadius; dy++) {
+    const py = fy + dy;
+    if (py < 0 || py >= height) continue;
+    for (let dx = -fRadius; dx <= fRadius; dx++) {
+      const px = fx + dx;
+      if (px < 0 || px >= width) continue;
+
+      const d = Math.sqrt(dx * dx + dy * dy);
+      const angle = Math.atan2(dy, dx);
+      const petalR = fRadius * (0.8 + 0.2 * Math.cos(5 * angle));
+
+      if (d <= petalR) {
+        const idx = (py * width + px) * 4;
+        if (d < fRadius * 0.28) {
+          rgba[idx] = 250;
+          rgba[idx + 1] = 210;
+          rgba[idx + 2] = 40;
+        } else {
+          const shade = 1.0 - (d / fRadius) * 0.3;
+          rgba[idx] = Math.round(225 * shade);
+          rgba[idx + 1] = Math.round(30 * shade);
+          rgba[idx + 2] = Math.round(45 * shade);
+        }
+        rgba[idx + 3] = 255;
+      }
+    }
+  }
+
+  await sharp(Buffer.from(rgba.buffer), {
+    raw: { width, height, channels: 4 },
+  }).png().toFile(compoundPath);
+
+  console.log(`Generated compound woman flower portrait at ${compoundPath}`);
+  return compoundPath;
+}
+
 async function extractPriors() {
+  await ensureCompoundFlowerPortrait();
+
   const fixtures = [
     { name: 'woman_portrait', file: 'test-output/actual_portraits/woman_portrait.jpg' },
     { name: 'leather_jacket_portrait', file: 'test-output/actual_portraits/leather_jacket_portrait.jpg' },
     { name: 'alex_pretti_glasses', file: 'test-output/actual_portraits/alex_pretti_glasses.jpg' },
+    { name: 'compound_woman_red_flower', file: 'test-output/actual_portraits/compound_woman_red_flower.png' },
   ];
 
   const previewProcess = spawn('npx', ['vite', 'preview', '--port', String(PREVIEW_PORT)], {

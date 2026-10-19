@@ -137,6 +137,7 @@ function clonePersonRegions(regions: PersonRegion[]): PersonRegion[] {
     box: { ...r.box },
     cropBounds: r.cropBounds ? { ...r.cropBounds } : undefined,
     cropMask: r.cropMask ? new Uint8Array(r.cropMask) : undefined,
+    cropConfidence: r.cropConfidence ? new Float32Array(r.cropConfidence) : undefined,
   }));
 }
 
@@ -171,7 +172,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
   const [smoothOutline, setSmoothOutlineState] = useState<number>(0);
   const [artworkEdgeSmoothness, setArtworkEdgeSmoothnessState] = useState<number>(0);
   const [artworkEdgeFeather, setArtworkEdgeFeatherState] = useState<number>(0);
-  const [bottomFinish, setBottomFinish] = useState<'flat' | 'rounded' | 'curved'>('flat');
+  const [bottomFinish, setBottomFinishState] = useState<'flat' | 'rounded' | 'curved'>('flat');
   const [bottomCurveRadius, setBottomCurveRadiusState] = useState<number>(30);
   const [qualityMode, setQualityModeState] = useState<'fast' | 'better' | 'best'>('better');
   const [decontaminateEdge, setDecontaminateEdgeState] = useState<boolean>(false);
@@ -192,6 +193,14 @@ export function usePhotoMode(): UsePhotoModeReturn {
   const [isReviewMode, setIsReviewMode] = useState<boolean>(false);
   const [stageTimings, setStageTimings] = useState<Record<string, number>>({});
   const [manualDelta, setManualDelta] = useState<Int8Array | null>(null);
+  const [fallbackConfidence, setFallbackConfidence] = useState<Float32Array | undefined>(undefined);
+  const [loadedAlphaMatte, setLoadedAlphaMatte] = useState<Uint8Array | undefined>(undefined);
+  const [loadedDecontaminatedRgb, setLoadedDecontaminatedRgb] = useState<Uint8ClampedArray | undefined>(undefined);
+
+  const clearLoadedPrecomputed = useCallback(() => {
+    setLoadedAlphaMatte(undefined);
+    setLoadedDecontaminatedRgb(undefined);
+  }, []);
 
   // Undo / Redo history with coherent snapshots (mask, personRegions, selection, manualDelta)
   const undoStackRef = useRef<PhotoHistorySnapshot[]>([]);
@@ -252,9 +261,12 @@ export function usePhotoMode(): UsePhotoModeReturn {
   ]);
 
   const confidenceMap = useMemo(() => {
-    if (!sourceImage || personRegions.length === 0) return undefined;
-    return combinePersonConfidence(personRegions, sourceImage.width, sourceImage.height);
-  }, [personRegions, sourceImage]);
+    if (!sourceImage) return undefined;
+    if (personRegions.length > 0) {
+      return combinePersonConfidence(personRegions, sourceImage.width, sourceImage.height);
+    }
+    return fallbackConfidence;
+  }, [personRegions, sourceImage, fallbackConfidence]);
 
   // Recompose sticker whenever mask, sourceImage, borderThickness, or finishing options change
   useEffect(() => {
@@ -289,7 +301,10 @@ export function usePhotoMode(): UsePhotoModeReturn {
         accessoryMerge,
         confidenceMap,
         primaryRegionBox: primaryRegion?.box,
+        protectedBoxes: personRegions.filter(r => r.included).map(r => r.box),
         manualDelta,
+        precomputedAlphaMatte: loadedAlphaMatte,
+        precomputedDecontaminatedRgb: loadedDecontaminatedRgb,
       }
     );
     setComposedResult(res);
@@ -310,6 +325,8 @@ export function usePhotoMode(): UsePhotoModeReturn {
     edgeTrim,
     bottomFinish,
     bottomCurveRadius,
+    loadedAlphaMatte,
+    loadedDecontaminatedRgb,
   ]);
 
   // Load photo file
@@ -388,6 +405,8 @@ export function usePhotoMode(): UsePhotoModeReturn {
         timings.totalMs = performance.now() - tTotal0;
 
         const newMask = new Uint8Array(singleResult.mask);
+        setFallbackConfidence(singleResult.confidenceMap);
+        clearLoadedPrecomputed();
         setBaseAiMask(new Uint8Array(newMask));
         if (mask) pushUndoSnapshot();
         setMask(newMask);
@@ -401,6 +420,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
         return;
       }
 
+      setFallbackConfidence(undefined);
+      clearLoadedPrecomputed();
+
       // Perform regional crop segmentation for each detected person
       const tCrops0 = performance.now();
       const processedRegions: PersonRegion[] = [];
@@ -408,11 +430,12 @@ export function usePhotoMode(): UsePhotoModeReturn {
       for (let i = 0; i < detected.length; i++) {
         const reg = detected[i];
         setProgressMessage(`Segmenting person ${i + 1} of ${detected.length}...`);
-        const { cropMask, cropBounds } = await segmentPersonCrop(sourceImage, reg, DEFAULT_CROP_MARGIN_RATIO);
+        const { cropMask, cropBounds, cropConfidence } = await segmentPersonCrop(sourceImage, reg, DEFAULT_CROP_MARGIN_RATIO);
         processedRegions.push({
           ...reg,
           cropMask,
           cropBounds,
+          cropConfidence,
         });
       }
       timings.segmentationMs = performance.now() - tCrops0;
@@ -442,7 +465,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     } finally {
       setIsProcessing(false);
     }
-  }, [sourceImage, mask, pushUndoSnapshot]);
+  }, [sourceImage, mask, pushUndoSnapshot, clearLoadedPrecomputed]);
 
   // General removeBackground: delegates to detectPeople
   const removeBackground = useCallback(async () => {
@@ -471,10 +494,12 @@ export function usePhotoMode(): UsePhotoModeReturn {
         included: true,
       };
 
-      const { cropMask, cropBounds } = await segmentPersonCrop(sourceImage, newRegion, DEFAULT_CROP_MARGIN_RATIO);
+      const { cropMask, cropBounds, cropConfidence } = await segmentPersonCrop(sourceImage, newRegion, DEFAULT_CROP_MARGIN_RATIO);
       newRegion.cropMask = cropMask;
       newRegion.cropBounds = cropBounds;
+      newRegion.cropConfidence = cropConfidence;
 
+      clearLoadedPrecomputed();
       const updatedRegions = [...personRegions, newRegion];
       const combinedMask = composeCompositeMask(updatedRegions, W, H, manualDelta);
 
@@ -509,10 +534,12 @@ export function usePhotoMode(): UsePhotoModeReturn {
       const H = sourceImage.height;
 
       const targetRegion = { ...personRegions[regionIdx], box: newBox };
-      const { cropMask, cropBounds } = await segmentPersonCrop(sourceImage, targetRegion, DEFAULT_CROP_MARGIN_RATIO);
+      const { cropMask, cropBounds, cropConfidence } = await segmentPersonCrop(sourceImage, targetRegion, DEFAULT_CROP_MARGIN_RATIO);
       targetRegion.cropMask = cropMask;
       targetRegion.cropBounds = cropBounds;
+      targetRegion.cropConfidence = cropConfidence;
 
+      clearLoadedPrecomputed();
       const updated = [...personRegions];
       updated[regionIdx] = targetRegion;
 
@@ -530,11 +557,12 @@ export function usePhotoMode(): UsePhotoModeReturn {
     } finally {
       setIsProcessing(false);
     }
-  }, [sourceImage, personRegions, mask, manualDelta, pushUndoSnapshot]);
+  }, [sourceImage, personRegions, mask, manualDelta, pushUndoSnapshot, clearLoadedPrecomputed]);
 
   // Delete Person Region
   const deletePersonRegion = useCallback((id: string) => {
     if (!sourceImage) return;
+    clearLoadedPrecomputed();
     const updated = personRegions.filter(r => r.id !== id);
     const W = sourceImage.width;
     const H = sourceImage.height;
@@ -547,11 +575,12 @@ export function usePhotoMode(): UsePhotoModeReturn {
     redoStackRef.current = [];
     setHistoryVersion(v => v + 1);
     setProgressMessage(`Removed region. ${updated.filter(r => r.included).length} people selected.`);
-  }, [sourceImage, personRegions, mask, selectedRegionId, manualDelta, pushUndoSnapshot]);
+  }, [sourceImage, personRegions, mask, selectedRegionId, manualDelta, pushUndoSnapshot, clearLoadedPrecomputed]);
 
   // Toggle Person Included
   const togglePersonIncluded = useCallback((id: string) => {
     if (!sourceImage) return;
+    clearLoadedPrecomputed();
     const updated = personRegions.map(r => (r.id === id ? { ...r, included: !r.included } : r));
     const W = sourceImage.width;
     const H = sourceImage.height;
@@ -564,7 +593,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setHistoryVersion(v => v + 1);
     const count = updated.filter(r => r.included).length;
     setProgressMessage(`${count} people selected. Review the image and add anyone missing before creating your sticker.`);
-  }, [sourceImage, personRegions, mask, manualDelta, pushUndoSnapshot]);
+  }, [sourceImage, personRegions, mask, manualDelta, pushUndoSnapshot, clearLoadedPrecomputed]);
 
   // Rerun Person Segmentation for selected region
   const rerunPersonSegmentation = useCallback(async (id: string) => {
@@ -600,6 +629,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
     if (patch) {
       if (mask) pushUndoSnapshot();
+      clearLoadedPrecomputed();
 
       const updatedMask = new Uint8Array(W * H);
       for (let i = 0; i < W * H; i++) {
@@ -627,11 +657,12 @@ export function usePhotoMode(): UsePhotoModeReturn {
       setMask(updatedMask);
       setHistoryVersion(v => v + 1);
     }
-  }, [sourceImage, mask, brushSize, manualDelta, pushUndoSnapshot]);
+  }, [sourceImage, mask, brushSize, manualDelta, pushUndoSnapshot, clearLoadedPrecomputed]);
 
   // Undo
   const undo = useCallback(() => {
     if (undoStackRef.current.length === 0 || !mask) return;
+    clearLoadedPrecomputed();
     const prev = undoStackRef.current.pop()!;
 
     // Push current to redo
@@ -654,6 +685,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
   // Redo
   const redo = useCallback(() => {
     if (redoStackRef.current.length === 0 || !mask) return;
+    clearLoadedPrecomputed();
     const next = redoStackRef.current.pop()!;
 
     // Push current to undo
@@ -671,31 +703,40 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setSelectedRegionId(next.selectedRegionId);
     setManualDelta(next.manualDelta);
     setHistoryVersion(v => v + 1);
-  }, [mask, personRegions, selectedRegionId, manualDelta]);
+  }, [mask, personRegions, selectedRegionId, manualDelta, clearLoadedPrecomputed]);
 
   const setBorderThickness = useCallback((val: number) => {
     setBorderThicknessState(Math.max(0, Math.min(100, Math.round(val))));
   }, []);
 
   const setEdgeTrim = useCallback((val: number) => {
+    clearLoadedPrecomputed();
     setEdgeTrimState(Math.max(0, Math.min(10, Math.round(val))));
-  }, []);
+  }, [clearLoadedPrecomputed]);
 
   const setSmoothOutline = useCallback((val: number) => {
     setSmoothOutlineState(Math.max(0, Math.min(10, Math.round(val))));
   }, []);
 
   const setArtworkEdgeSmoothness = useCallback((val: number) => {
+    clearLoadedPrecomputed();
     setArtworkEdgeSmoothnessState(Math.max(0, Math.min(10, Math.round(val))));
-  }, []);
+  }, [clearLoadedPrecomputed]);
 
   const setArtworkEdgeFeather = useCallback((val: number) => {
+    clearLoadedPrecomputed();
     setArtworkEdgeFeatherState(Math.max(0, Math.min(3, Math.round(val * 2) / 2)));
-  }, []);
+  }, [clearLoadedPrecomputed]);
+
+  const setBottomFinish = useCallback((mode: 'flat' | 'rounded' | 'curved') => {
+    clearLoadedPrecomputed();
+    setBottomFinishState(mode);
+  }, [clearLoadedPrecomputed]);
 
   const setBottomCurveRadius = useCallback((val: number) => {
+    clearLoadedPrecomputed();
     setBottomCurveRadiusState(Math.max(5, Math.min(100, Math.round(val))));
-  }, []);
+  }, [clearLoadedPrecomputed]);
 
   const touchesBottomEdge = useMemo(() => {
     if (!sourceImage || !mask) return false;
@@ -704,6 +745,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
   const cleanFragments = useCallback((minArea: number = 200) => {
     if (!sourceImage || !mask) return;
+    clearLoadedPrecomputed();
     const W = sourceImage.width;
     const H = sourceImage.height;
     const protectedBoxes = personRegions.filter(r => r.included).map(r => r.box);
@@ -723,7 +765,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     } else {
       setProgressMessage('No stray fragments found.');
     }
-  }, [sourceImage, mask, personRegions, manualDelta, pushUndoSnapshot]);
+  }, [sourceImage, mask, personRegions, manualDelta, pushUndoSnapshot, clearLoadedPrecomputed]);
 
   const getBaseName = useCallback(() => {
     return fileName.replace(/\.[^/.]+$/, '');
@@ -854,7 +896,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
       alphaMask[i] = mask[i] > 0 ? 255 : 0;
     }
 
-    // Serialize person regions with their masks
+    // Serialize person regions with their masks and continuous confidence
     const serializedRegions: SerializedPersonRegion[] = personRegions.map(r => ({
       id: r.id,
       label: r.label,
@@ -864,6 +906,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
       included: r.included,
       cropBounds: r.cropBounds,
       maskData: r.cropMask ? uint8ToBase64(r.cropMask) : undefined,
+      confidenceData: r.cropConfidence
+        ? uint8ToBase64(new Uint8Array(r.cropConfidence.buffer, r.cropConfidence.byteOffset, r.cropConfidence.byteLength))
+        : undefined,
     }));
 
     let manualDeltaBase64: string | undefined = undefined;
@@ -889,7 +934,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
       globalSolidBacking: false,
       globalWhiteBacking: true,
       projectType: 'photo',
-        photoSettings: {
+      photoSettings: {
         borderThickness,
         previewBg,
         hasRemovedBackground: true,
@@ -908,6 +953,13 @@ export function usePhotoMode(): UsePhotoModeReturn {
         decontaminateEdge,
         hairDetail,
         accessoryMerge,
+        fallbackConfidence: fallbackConfidence
+          ? uint8ToBase64(new Uint8Array(fallbackConfidence.buffer, fallbackConfidence.byteOffset, fallbackConfidence.byteLength))
+          : undefined,
+        alphaMatteData: composedResult?.alphaMatte ? uint8ToBase64(composedResult.alphaMatte) : undefined,
+        decontaminatedData: composedResult?.decontaminatedRgb
+          ? uint8ToBase64(new Uint8Array(composedResult.decontaminatedRgb.buffer, composedResult.decontaminatedRgb.byteOffset, composedResult.decontaminatedRgb.byteLength))
+          : undefined,
       },
     });
 
@@ -932,6 +984,8 @@ export function usePhotoMode(): UsePhotoModeReturn {
     decontaminateEdge,
     hairDetail,
     accessoryMerge,
+    fallbackConfidence,
+    composedResult,
     getBaseName,
     downloadBlob,
   ]);
@@ -980,17 +1034,49 @@ export function usePhotoMode(): UsePhotoModeReturn {
         setManualDelta(null);
       }
 
+      if (loaded.metadata.photoSettings.fallbackConfidence) {
+        const u8 = base64ToUint8(loaded.metadata.photoSettings.fallbackConfidence);
+        const copyBuf = new ArrayBuffer(u8.byteLength);
+        new Uint8Array(copyBuf).set(u8);
+        setFallbackConfidence(new Float32Array(copyBuf));
+      } else {
+        setFallbackConfidence(undefined);
+      }
+
+      if (loaded.metadata.photoSettings.alphaMatteData) {
+        setLoadedAlphaMatte(base64ToUint8(loaded.metadata.photoSettings.alphaMatteData));
+      } else {
+        setLoadedAlphaMatte(undefined);
+      }
+
+      if (loaded.metadata.photoSettings.decontaminatedData) {
+        const u8 = base64ToUint8(loaded.metadata.photoSettings.decontaminatedData);
+        setLoadedDecontaminatedRgb(new Uint8ClampedArray(u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength)));
+      } else {
+        setLoadedDecontaminatedRgb(undefined);
+      }
+
       if (loaded.metadata.photoSettings.personRegions && loaded.metadata.photoSettings.personRegions.length > 0) {
-        const restoredRegions: PersonRegion[] = loaded.metadata.photoSettings.personRegions.map(sr => ({
-          id: sr.id,
-          label: sr.label,
-          box: sr.box,
-          score: sr.score,
-          isManual: sr.isManual,
-          included: sr.included,
-          cropBounds: sr.cropBounds,
-          cropMask: sr.maskData ? base64ToUint8(sr.maskData) : undefined,
-        }));
+        const restoredRegions: PersonRegion[] = loaded.metadata.photoSettings.personRegions.map(sr => {
+          let cropConfidence: Float32Array | undefined = undefined;
+          if (sr.confidenceData) {
+            const u8 = base64ToUint8(sr.confidenceData);
+            const copyBuf = new ArrayBuffer(u8.byteLength);
+            new Uint8Array(copyBuf).set(u8);
+            cropConfidence = new Float32Array(copyBuf);
+          }
+          return {
+            id: sr.id,
+            label: sr.label,
+            box: sr.box,
+            score: sr.score,
+            isManual: sr.isManual,
+            included: sr.included,
+            cropBounds: sr.cropBounds,
+            cropMask: sr.maskData ? base64ToUint8(sr.maskData) : undefined,
+            cropConfidence,
+          };
+        });
         setPersonRegions(restoredRegions);
       } else {
         setPersonRegions([]);
@@ -1013,6 +1099,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setStageTimings({});
     setViewMode('sticker');
     setManualDelta(null);
+    setFallbackConfidence(undefined);
+    setLoadedAlphaMatte(undefined);
+    setLoadedDecontaminatedRgb(undefined);
     setEdgeTrimState(0);
     setSmoothOutlineState(0);
     setArtworkEdgeSmoothnessState(0);
@@ -1029,25 +1118,29 @@ export function usePhotoMode(): UsePhotoModeReturn {
   }, []);
 
   const setQualityMode = useCallback((mode: 'fast' | 'better' | 'best') => {
+    clearLoadedPrecomputed();
     setQualityModeState(mode);
     if (mode === 'better') {
       setDecontaminateEdgeState(false);
     } else if (mode === 'best') {
       setDecontaminateEdgeState(true);
     }
-  }, []);
+  }, [clearLoadedPrecomputed]);
 
   const setDecontaminateEdge = useCallback((val: boolean) => {
+    clearLoadedPrecomputed();
     setDecontaminateEdgeState(val);
-  }, []);
+  }, [clearLoadedPrecomputed]);
 
   const setHairDetail = useCallback((val: number) => {
+    clearLoadedPrecomputed();
     setHairDetailState(val);
-  }, []);
+  }, [clearLoadedPrecomputed]);
 
   const setAccessoryMerge = useCallback((val: boolean) => {
+    clearLoadedPrecomputed();
     setAccessoryMergeState(val);
-  }, []);
+  }, [clearLoadedPrecomputed]);
 
   return {
     sourceImage,
