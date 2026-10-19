@@ -168,6 +168,7 @@ describe('Cartoon Project Lossless Persistence & Deterministic Reopening', () =>
       headPngDataUrl,
       alphaMaskBase64,
       rawCropMaskBase64,
+      landmarks,
       dateModified: new Date().toISOString(),
     };
 
@@ -177,6 +178,8 @@ describe('Cartoon Project Lossless Persistence & Deterministic Reopening', () =>
     let mediaPipeInvoked = false;
 
     const parsedProject: CartoonProjectData = JSON.parse(serializedJson);
+    expect(parsedProject.landmarks).toBeDefined();
+    expect(parsedProject.landmarks?.eyeMidpoint.x).toBe(landmarks.eyeMidpoint.x);
 
     // Deterministic fast-path restoration
     const restoredImg = new Image();
@@ -193,12 +196,13 @@ describe('Cartoon Project Lossless Persistence & Deterministic Reopening', () =>
     const restoredRawCropMask = parsedProject.rawCropMaskBase64
       ? base64ToUint8Array(parsedProject.rawCropMaskBase64)
       : undefined;
+    const restoredLandmarks = parsedProject.landmarks ?? null;
 
     const restoredCanvases = separateFrontAndRearHairCanvases(
       restoredHeadCanvas,
       restoredAlphaMask,
       parsedProject.headCropBounds,
-      null
+      restoredLandmarks
     );
 
     const restoredHead: ExtractedHeadResult = {
@@ -210,7 +214,7 @@ describe('Cartoon Project Lossless Persistence & Deterministic Reopening', () =>
       height: restoredImg.height,
       cropBounds: parsedProject.headCropBounds,
       alphaMask: restoredAlphaMask,
-      landmarks: null,
+      landmarks: restoredLandmarks,
     };
 
     // Recomposite
@@ -296,5 +300,76 @@ describe('Cartoon Project Lossless Persistence & Deterministic Reopening', () =>
 
     const finalPx = checkCtx.getImageData(0, 0, W, H);
     expect(finalPx.data[(10 * W + 10) * 4 + 3]).toBe(0); // Transparent after restore!
+  });
+
+  it('rehydrates original selfie image locally and recovers real photographic RGB when restoring transparent pixels', async () => {
+    const W = 50;
+    const H = 50;
+
+    // Create a mock original selfie canvas with known photographic RGB (e.g., [180, 120, 90])
+    const selfieCanvas = createTestCanvas(100, 100);
+    const sCtx = selfieCanvas.getContext('2d')!;
+    const sImgData = sCtx.createImageData(100, 100);
+    for (let i = 0; i < 100 * 100; i++) {
+      sImgData.data[i * 4] = 180;
+      sImgData.data[i * 4 + 1] = 120;
+      sImgData.data[i * 4 + 2] = 90;
+      sImgData.data[i * 4 + 3] = 255;
+    }
+    sCtx.putImageData(sImgData, 0, 0);
+
+    // Initial extracted head has a transparent pixel at (15, 15)
+    const headCanvas = createTestCanvas(W, H);
+    const hCtx = headCanvas.getContext('2d')!;
+    const hImgData = hCtx.createImageData(W, H);
+    // Erased/transparent pixel at (15, 15) has 0,0,0,0
+    hCtx.putImageData(hImgData, 0, 0);
+
+    const alphaMask = new Uint8Array(W * H); // all 0
+    const cropBounds = { x: 10, y: 10, width: W, height: H };
+
+    // Simulate rehydrating selfieImg from saved project
+    const selfieImg = new Image();
+    (selfieImg as any)._buffer = (selfieCanvas as any)._buffer;
+
+    // Now user paints with 'restore' over (15, 15)
+    const patch = applyBrushStroke(alphaMask, W, H, [
+      { x: 15, y: 15, pressure: 1.0 },
+    ], {
+      radius: 5,
+      hardness: 1.0,
+      opacity: 1.0,
+      mode: 'restore',
+    });
+
+    expect(patch).not.toBeNull();
+    expect(alphaMask[15 * W + 15]).toBe(255); // Restored!
+
+    // Apply the drawImage from selfieImg pattern used in useCartoonMode
+    if (selfieImg) {
+      hCtx.drawImage(
+        selfieImg as any,
+        cropBounds.x,
+        cropBounds.y,
+        cropBounds.width,
+        cropBounds.height,
+        0,
+        0,
+        W,
+        H
+      );
+    }
+    const updatedImgData = hCtx.getImageData(0, 0, W, H);
+    for (let i = 0; i < W * H; i++) {
+      updatedImgData.data[i * 4 + 3] = alphaMask[i];
+    }
+    hCtx.putImageData(updatedImgData, 0, 0);
+
+    // Verify: pixel (15, 15) has recovered real photographic RGB [180, 120, 90], NOT [0, 0, 0]!
+    const restoredPixelIdx = (15 * W + 15) * 4;
+    expect(updatedImgData.data[restoredPixelIdx]).toBe(180);
+    expect(updatedImgData.data[restoredPixelIdx + 1]).toBe(120);
+    expect(updatedImgData.data[restoredPixelIdx + 2]).toBe(90);
+    expect(updatedImgData.data[restoredPixelIdx + 3]).toBe(255);
   });
 });

@@ -145,5 +145,7 @@ export interface CartoonProjectData {
   alphaMaskBase64?: string;
   /** Base64-encoded raw crop mask */
   rawCropMaskBase64?: string;
+  /** Saved face landmarks to reproduce exact front/rear hair partition without rerunning MediaPipe */
+  landmarks?: FaceLandmarks | null;
   dateModified: string;
 }

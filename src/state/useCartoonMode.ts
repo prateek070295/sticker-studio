@@ -517,6 +517,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
       headPngDataUrl: extractedHead.canvas.toDataURL('image/png'),
       alphaMaskBase64: uint8ArrayToBase64(extractedHead.alphaMask),
       rawCropMaskBase64: extractedHead.rawCropMask ? uint8ArrayToBase64(extractedHead.rawCropMask) : undefined,
+      landmarks: extractedHead.landmarks,
       dateModified: new Date().toISOString(),
     };
 
@@ -544,11 +545,27 @@ export function useCartoonMode(): UseCartoonModeReturn {
         if (proj.headPngDataUrl && proj.headCropBounds) {
           // Fast-path: deterministic lossless restoration without re-segmentation
           const img = new Image();
-          await new Promise<void>((resolve, reject) => {
+          const headPromise = new Promise<void>((resolve, reject) => {
             img.onload = () => resolve();
             img.onerror = () => reject(new Error('Failed to decode head PNG'));
             img.src = proj.headPngDataUrl!;
           });
+
+          // Rehydrate selfieImgRef so brush Erase/Restore can access original photographic RGB
+          let selfiePromise: Promise<void> | null = null;
+          if (proj.selfieDataUrl) {
+            const selfieImg = new Image();
+            selfiePromise = new Promise<void>((resolve, reject) => {
+              selfieImg.onload = () => {
+                selfieImgRef.current = selfieImg;
+                resolve();
+              };
+              selfieImg.onerror = () => reject(new Error('Failed to decode saved selfie image'));
+              selfieImg.src = proj.selfieDataUrl;
+            });
+          }
+
+          await Promise.all([headPromise, selfiePromise ? selfiePromise : Promise.resolve()]);
 
           const cropW = img.width;
           const cropH = img.height;
@@ -571,12 +588,13 @@ export function useCartoonMode(): UseCartoonModeReturn {
           }
 
           const rawCropMask = proj.rawCropMaskBase64 ? base64ToUint8Array(proj.rawCropMaskBase64) : undefined;
+          const restoredLandmarks = proj.landmarks ?? null;
 
           const { frontCanvas, rearHairCanvas } = separateFrontAndRearHairCanvases(
             headCanvas,
             alphaMask,
             proj.headCropBounds,
-            null
+            restoredLandmarks
           );
 
           const restoredHead: ExtractedHeadResult = {
@@ -588,7 +606,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
             height: cropH,
             cropBounds: proj.headCropBounds,
             alphaMask,
-            landmarks: null,
+            landmarks: restoredLandmarks,
           };
 
           setExtractedHead(restoredHead);
