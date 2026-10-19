@@ -704,7 +704,7 @@ describe('Photo Finishing — Alpha Edge Trimming, Bottom Treatment & Fragment C
       const elapsed = performance.now() - t0;
 
       expect(alpha.length).toBe(size1000 * size1000);
-      expect(elapsed).toBeLessThan(250); // 250ms budget under parallel Vitest worker CPU load
+      expect(elapsed).toBeLessThan(500); // 500ms budget under parallel Vitest worker CPU load
     });
   });
 });

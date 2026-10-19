@@ -9,6 +9,7 @@ import { ControlsPanel } from './components/ControlsPanel';
 import { PhotoModeView } from './components/photo/PhotoModeView';
 import { usePWA } from './pwa/usePWA';
 import { InstallModal } from './components/InstallModal';
+import { CartoonModeView } from './components/cartoon/CartoonModeView';
 import { AppMode } from './types';
 
 const AdvancedEditorModal = React.lazy(() =>
@@ -115,6 +116,29 @@ export default function App() {
   const [appMode, setAppMode] = useState<AppMode>('sheet');
   const photo = usePhotoMode();
 
+  // Isolated V1.4 Prototype Mode (active via #cartoon hash or ?mode=cartoon)
+  const [isCartoonMode, setIsCartoonMode] = useState<boolean>(() => {
+    return typeof window !== 'undefined' && (
+      window.location.hash === '#cartoon' ||
+      new URLSearchParams(window.location.search).get('mode') === 'cartoon'
+    );
+  });
+
+  useEffect(() => {
+    const checkHash = () => {
+      setIsCartoonMode(
+        window.location.hash === '#cartoon' ||
+        new URLSearchParams(window.location.search).get('mode') === 'cartoon'
+      );
+    };
+    window.addEventListener('hashchange', checkHash);
+    window.addEventListener('popstate', checkHash);
+    return () => {
+      window.removeEventListener('hashchange', checkHash);
+      window.removeEventListener('popstate', checkHash);
+    };
+  }, []);
+
   const [isDragOver, setIsDragOver] = useState<boolean>(false);
 
   // Global project archive loader
@@ -199,6 +223,17 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [appMode, photo, undo, redo, setToolMode, setSelectedGroupIds, setSelectedComponentIds]);
+
+  if (isCartoonMode) {
+    return (
+      <CartoonModeView
+        onBackToMain={() => {
+          window.location.hash = '';
+          setIsCartoonMode(false);
+        }}
+      />
+    );
+  }
 
   return (
     <div
