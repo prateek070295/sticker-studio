@@ -4,6 +4,8 @@ import {
   ExtractedHeadResult,
   HeadTransform,
   CartoonProjectData,
+  GlobalHeadAlignment,
+  IndividualHeadAlignment,
 } from '../cartoon/types';
 import {
   HI_WAVING_TEMPLATE,
@@ -13,6 +15,8 @@ import {
 import { extractPhotographicHead } from '../core/cartoonHeadExtractor';
 import {
   computeInitialHeadPlacement,
+  computeEffectiveHeadTransform,
+  convertLegacyTransformToIndividualAlignment,
   renderCartoonArtwork,
   generateCartoonStickerDieCut,
 } from '../core/cartoonCompositor';
@@ -108,13 +112,20 @@ export interface UseCartoonModeReturn {
   error: string | null;
 
   // V1.5 Reactions Pack State
-  viewMode: 'gallery' | 'detail';
+  viewMode: 'gallery' | 'detail' | 'global_alignment';
   templates: CartoonTemplateManifest[];
   selectedTemplateIds: string[];
   packPreviews: Record<string, PackStickerPreview>;
   templateTransforms: Record<string, HeadTransform>;
   templateBorderThicknesses: Record<string, number>;
   isExportingZip: boolean;
+
+  // V1.6 Smart Alignment State
+  globalHeadAlignment: GlobalHeadAlignment;
+  individualHeadAlignments: Record<string, IndividualHeadAlignment>;
+  calibratedChin: { x: number; y: number } | null;
+  alignmentScope: 'all' | 'individual';
+  globalRefTemplateId: string;
 
   // Mask & Tool Controls
   toolMode: 'move' | 'erase' | 'restore';
@@ -123,7 +134,16 @@ export interface UseCartoonModeReturn {
   canRedo: boolean;
 
   // Actions
-  setViewMode: (mode: 'gallery' | 'detail') => void;
+  setViewMode: (mode: 'gallery' | 'detail' | 'global_alignment') => void;
+  setAlignmentScope: (scope: 'all' | 'individual') => void;
+  setGlobalRefTemplateId: (id: string) => void;
+  setGlobalHeadAlignment: (update: Partial<GlobalHeadAlignment>) => void;
+  setIndividualHeadAlignment: (templateId: string, update: Partial<IndividualHeadAlignment> | null) => void;
+  setCalibratedChin: (chin: { x: number; y: number } | null) => void;
+  applyAlignmentDrag: (deltaCanvasX: number, deltaCanvasY: number, referenceTemplateId?: string) => void;
+  resetGlobalAlignment: () => void;
+  resetIndividualAlignment: (templateId: string) => void;
+  resetAllAlignment: () => void;
   selectTemplateForEdit: (templateId: string) => void;
   toggleTemplateSelection: (id: string) => void;
   selectAllTemplates: () => void;
@@ -172,7 +192,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
   const [error, setError] = useState<string | null>(null);
 
   // V1.5 Reactions Pack State
-  const [viewMode, setViewMode] = useState<'gallery' | 'detail'>('gallery');
+  const [viewMode, setViewMode] = useState<'gallery' | 'detail' | 'global_alignment'>('gallery');
   const [selectedTemplateIds, setSelectedTemplateIds] = useState<string[]>(
     CARTOON_REACTIONS_PACK.map((t) => t.id)
   );
@@ -180,6 +200,21 @@ export function useCartoonMode(): UseCartoonModeReturn {
   const [templateTransforms, setTemplateTransforms] = useState<Record<string, HeadTransform>>({});
   const [templateBorderThicknesses, setTemplateBorderThicknesses] = useState<Record<string, number>>({});
   const [isExportingZip, setIsExportingZip] = useState<boolean>(false);
+
+  // V1.6 Smart Alignment State
+  const [globalHeadAlignment, setGlobalHeadAlignmentState] = useState<GlobalHeadAlignment>({
+    scaleMultiplier: 1.0,
+    rotationDelta: 0,
+    offsetX: 0,
+    offsetY: 0,
+  });
+  const [individualHeadAlignments, setIndividualHeadAlignmentsState] = useState<Record<string, IndividualHeadAlignment>>({});
+  const [calibratedChin, setCalibratedChinState] = useState<{ x: number; y: number } | null>(null);
+  const [alignmentScope, setAlignmentScope] = useState<'all' | 'individual'>('all');
+  const [globalRefTemplateId, setGlobalRefTemplateId] = useState<string>(HI_WAVING_TEMPLATE.id);
+
+  // Debounced preview rendering timer
+  const debounceTimerRef = useRef<any>(null);
 
   // Brush mask editing controls
   const [toolMode, setToolMode] = useState<'move' | 'erase' | 'restore'>('move');
@@ -189,6 +224,31 @@ export function useCartoonMode(): UseCartoonModeReturn {
 
   // Cached full selfie image element
   const selfieImgRef = useRef<HTMLImageElement | null>(null);
+
+  // Compute effective transforms across all reaction templates
+  const computeAllTransforms = useCallback(
+    (
+      head: ExtractedHeadResult,
+      gAlign: GlobalHeadAlignment,
+      iAligns: Record<string, IndividualHeadAlignment>,
+      cChin: { x: number; y: number } | null
+    ): Record<string, HeadTransform> => {
+      const transforms: Record<string, HeadTransform> = {};
+      for (const tpl of CARTOON_REACTIONS_PACK) {
+        const base = computeInitialHeadPlacement(tpl, head, cChin);
+        transforms[tpl.id] = computeEffectiveHeadTransform(
+          tpl,
+          head,
+          base,
+          gAlign,
+          iAligns[tpl.id],
+          cChin
+        );
+      }
+      return transforms;
+    },
+    []
+  );
 
   // Re-composite active sticker whenever active template, head, transform, or border changes
   const recomposite = useCallback(
@@ -254,6 +314,59 @@ export function useCartoonMode(): UseCartoonModeReturn {
     []
   );
 
+  // Schedule pack preview rendering with immediate active template update and debounced rest
+  const triggerPackPreviewsUpdate = useCallback(
+    (
+      head: ExtractedHeadResult,
+      transforms: Record<string, HeadTransform>,
+      customBorders: Record<string, number>,
+      gBorder: number,
+      sLevel: number,
+      immediateTemplateId?: string
+    ) => {
+      if (immediateTemplateId) {
+        const tpl =
+          ALL_CARTOON_TEMPLATES[immediateTemplateId] ||
+          CARTOON_REACTIONS_PACK.find((t) => t.id === immediateTemplateId);
+        const tf = transforms[immediateTemplateId];
+        if (tpl && tf) {
+          const bThick = customBorders[immediateTemplateId] ?? gBorder;
+          renderCartoonArtwork(tpl, head, tf)
+            .then((art) => {
+              const { stickerCanvas: stCanvas, tightCrop: crop } = generateCartoonStickerDieCut(
+                art,
+                bThick,
+                sLevel
+              );
+              setPackPreviews((prev) => ({
+                ...prev,
+                [immediateTemplateId]: {
+                  artworkCanvas: art,
+                  stickerCanvas: stCanvas,
+                  tightCrop: crop,
+                },
+              }));
+              if (activeTemplate.id === immediateTemplateId) {
+                setArtworkCanvas(art);
+                setStickerCanvas(stCanvas);
+                setTightCrop(crop);
+                setHeadTransform(tf);
+              }
+            })
+            .catch(console.error);
+        }
+      }
+
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      debounceTimerRef.current = setTimeout(() => {
+        renderAllPackPreviews(head, transforms, customBorders, gBorder, sLevel);
+      }, 70);
+    },
+    [activeTemplate.id, renderAllPackPreviews]
+  );
+
   // Pipeline from loaded selfie image
   const processImage = useCallback(
     async (img: HTMLImageElement, fileName: string) => {
@@ -272,15 +385,26 @@ export function useCartoonMode(): UseCartoonModeReturn {
 
         setExtractedHead(head);
 
+        // Reset alignment state for new selfie
+        const defaultGlobal: GlobalHeadAlignment = {
+          scaleMultiplier: 1.0,
+          rotationDelta: 0,
+          offsetX: 0,
+          offsetY: 0,
+        };
+        setGlobalHeadAlignmentState(defaultGlobal);
+        setIndividualHeadAlignmentsState({});
+        setCalibratedChinState(null);
+        setAlignmentScope('all');
+        setGlobalRefTemplateId(HI_WAVING_TEMPLATE.id);
+
         // Step 2: Compute initial auto placement for all 12 templates
         setProgressMessage('Calculating natural head alignment across 12 reaction templates...');
-        const initialTransforms: Record<string, HeadTransform> = {};
-        for (const tpl of CARTOON_REACTIONS_PACK) {
-          initialTransforms[tpl.id] = computeInitialHeadPlacement(tpl, head);
-        }
+        const initialTransforms = computeAllTransforms(head, defaultGlobal, {}, null);
         setTemplateTransforms(initialTransforms);
 
-        const currentActiveTransform = initialTransforms[activeTemplate.id] || initialTransforms[HI_WAVING_TEMPLATE.id];
+        const currentActiveTransform =
+          initialTransforms[activeTemplate.id] || initialTransforms[HI_WAVING_TEMPLATE.id];
         setHeadTransform(currentActiveTransform);
 
         // Step 3: Composite entire 12-sticker collection
@@ -310,7 +434,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
         setIsProcessing(false);
       }
     },
-    [activeTemplate, borderThickness, smoothOutlineLevel, renderAllPackPreviews]
+    [activeTemplate, borderThickness, smoothOutlineLevel, computeAllTransforms, renderAllPackPreviews]
   );
 
   const loadSelfieFile = useCallback(
@@ -356,7 +480,14 @@ export function useCartoonMode(): UseCartoonModeReturn {
 
       let tf = templateTransforms[templateId];
       if (!tf && extractedHead) {
-        tf = computeInitialHeadPlacement(tpl, extractedHead);
+        tf = computeEffectiveHeadTransform(
+          tpl,
+          extractedHead,
+          computeInitialHeadPlacement(tpl, extractedHead, calibratedChin),
+          globalHeadAlignment,
+          individualHeadAlignments[templateId],
+          calibratedChin
+        );
         setTemplateTransforms((prev) => ({ ...prev, [templateId]: tf }));
       }
       if (tf) {
@@ -375,7 +506,18 @@ export function useCartoonMode(): UseCartoonModeReturn {
 
       setViewMode('detail');
     },
-    [templateTransforms, extractedHead, packPreviews, templateBorderThicknesses, borderThickness, smoothOutlineLevel, recomposite]
+    [
+      templateTransforms,
+      extractedHead,
+      calibratedChin,
+      globalHeadAlignment,
+      individualHeadAlignments,
+      packPreviews,
+      templateBorderThicknesses,
+      borderThickness,
+      smoothOutlineLevel,
+      recomposite,
+    ]
   );
 
   const toggleTemplateSelection = useCallback((id: string) => {
@@ -392,6 +534,265 @@ export function useCartoonMode(): UseCartoonModeReturn {
     setSelectedTemplateIds([]);
   }, []);
 
+  // V1.6 Alignment Actions
+  const setGlobalHeadAlignment = useCallback(
+    (update: Partial<GlobalHeadAlignment>) => {
+      if (!extractedHead) return;
+      const next: GlobalHeadAlignment = {
+        scaleMultiplier:
+          update.scaleMultiplier !== undefined
+            ? Math.max(0.75, Math.min(1.35, parseFloat(update.scaleMultiplier.toFixed(3))))
+            : globalHeadAlignment.scaleMultiplier,
+        rotationDelta:
+          update.rotationDelta !== undefined
+            ? Math.max(-15, Math.min(15, parseFloat(update.rotationDelta.toFixed(1))))
+            : globalHeadAlignment.rotationDelta,
+        offsetX:
+          update.offsetX !== undefined
+            ? Math.max(-0.5, Math.min(0.5, parseFloat(update.offsetX.toFixed(4))))
+            : globalHeadAlignment.offsetX,
+        offsetY:
+          update.offsetY !== undefined
+            ? Math.max(-0.5, Math.min(0.5, parseFloat(update.offsetY.toFixed(4))))
+            : globalHeadAlignment.offsetY,
+      };
+      setGlobalHeadAlignmentState(next);
+
+      const nextTransforms = computeAllTransforms(
+        extractedHead,
+        next,
+        individualHeadAlignments,
+        calibratedChin
+      );
+      setTemplateTransforms(nextTransforms);
+
+      const refId = viewMode === 'global_alignment' ? globalRefTemplateId : activeTemplate.id;
+      if (nextTransforms[activeTemplate.id]) {
+        setHeadTransform(nextTransforms[activeTemplate.id]);
+      }
+      triggerPackPreviewsUpdate(
+        extractedHead,
+        nextTransforms,
+        templateBorderThicknesses,
+        borderThickness,
+        smoothOutlineLevel,
+        refId
+      );
+    },
+    [
+      extractedHead,
+      globalHeadAlignment,
+      individualHeadAlignments,
+      calibratedChin,
+      viewMode,
+      globalRefTemplateId,
+      activeTemplate.id,
+      templateBorderThicknesses,
+      borderThickness,
+      smoothOutlineLevel,
+      computeAllTransforms,
+      triggerPackPreviewsUpdate,
+    ]
+  );
+
+  const setIndividualHeadAlignment = useCallback(
+    (templateId: string, update: Partial<IndividualHeadAlignment> | null) => {
+      if (!extractedHead) return;
+      const nextAlignments = { ...individualHeadAlignments };
+      if (update === null) {
+        delete nextAlignments[templateId];
+      } else {
+        const current = nextAlignments[templateId] || {};
+        nextAlignments[templateId] = {
+          scaleMultiplier:
+            update.scaleMultiplier !== undefined
+              ? Math.max(0.2, Math.min(3.0, parseFloat(update.scaleMultiplier.toFixed(4))))
+              : (current.scaleMultiplier ?? 1.0),
+          rotationDelta:
+            update.rotationDelta !== undefined
+              ? Math.max(-45, Math.min(45, parseFloat(update.rotationDelta.toFixed(1))))
+              : (current.rotationDelta ?? 0),
+          offsetX:
+            update.offsetX !== undefined
+              ? Math.max(-1.5, Math.min(1.5, parseFloat(update.offsetX.toFixed(5))))
+              : (current.offsetX ?? 0),
+          offsetY:
+            update.offsetY !== undefined
+              ? Math.max(-1.5, Math.min(1.5, parseFloat(update.offsetY.toFixed(5))))
+              : (current.offsetY ?? 0),
+          hairBehindBody:
+            update.hairBehindBody !== undefined
+              ? update.hairBehindBody
+              : current.hairBehindBody,
+        };
+      }
+      setIndividualHeadAlignmentsState(nextAlignments);
+
+      const nextTransforms = computeAllTransforms(
+        extractedHead,
+        globalHeadAlignment,
+        nextAlignments,
+        calibratedChin
+      );
+      setTemplateTransforms(nextTransforms);
+
+      if (activeTemplate.id === templateId && nextTransforms[templateId]) {
+        setHeadTransform(nextTransforms[templateId]);
+      }
+      triggerPackPreviewsUpdate(
+        extractedHead,
+        nextTransforms,
+        templateBorderThicknesses,
+        borderThickness,
+        smoothOutlineLevel,
+        templateId
+      );
+    },
+    [
+      extractedHead,
+      individualHeadAlignments,
+      globalHeadAlignment,
+      calibratedChin,
+      activeTemplate.id,
+      templateBorderThicknesses,
+      borderThickness,
+      smoothOutlineLevel,
+      computeAllTransforms,
+      triggerPackPreviewsUpdate,
+    ]
+  );
+
+  const setCalibratedChin = useCallback(
+    (chin: { x: number; y: number } | null) => {
+      if (!extractedHead) return;
+      setCalibratedChinState(chin);
+
+      const nextTransforms = computeAllTransforms(
+        extractedHead,
+        globalHeadAlignment,
+        individualHeadAlignments,
+        chin
+      );
+      setTemplateTransforms(nextTransforms);
+
+      const refId = viewMode === 'global_alignment' ? globalRefTemplateId : activeTemplate.id;
+      if (nextTransforms[activeTemplate.id]) {
+        setHeadTransform(nextTransforms[activeTemplate.id]);
+      }
+      triggerPackPreviewsUpdate(
+        extractedHead,
+        nextTransforms,
+        templateBorderThicknesses,
+        borderThickness,
+        smoothOutlineLevel,
+        refId
+      );
+    },
+    [
+      extractedHead,
+      globalHeadAlignment,
+      individualHeadAlignments,
+      viewMode,
+      globalRefTemplateId,
+      activeTemplate.id,
+      templateBorderThicknesses,
+      borderThickness,
+      smoothOutlineLevel,
+      computeAllTransforms,
+      triggerPackPreviewsUpdate,
+    ]
+  );
+
+  const applyAlignmentDrag = useCallback(
+    (deltaCanvasX: number, deltaCanvasY: number, referenceTemplateId?: string) => {
+      if (!extractedHead) return;
+      const refId =
+        referenceTemplateId || (viewMode === 'global_alignment' ? globalRefTemplateId : activeTemplate.id);
+      const refTpl =
+        ALL_CARTOON_TEMPLATES[refId] ||
+        CARTOON_REACTIONS_PACK.find((t) => t.id === refId) ||
+        HI_WAVING_TEMPLATE;
+      const canvasH = refTpl.canvas.height;
+      const faceH = (refTpl.headSlot.targetFaceH ?? 0.254) * canvasH;
+
+      const deltaNormX = deltaCanvasX / faceH;
+      const deltaNormY = deltaCanvasY / faceH;
+
+      if (alignmentScope === 'all') {
+        setGlobalHeadAlignment({
+          offsetX: globalHeadAlignment.offsetX + deltaNormX,
+          offsetY: globalHeadAlignment.offsetY + deltaNormY,
+        });
+      } else {
+        const cur = individualHeadAlignments[refId] || {
+          scaleMultiplier: 1.0,
+          rotationDelta: 0,
+          offsetX: 0,
+          offsetY: 0,
+        };
+        setIndividualHeadAlignment(refId, {
+          offsetX: (cur.offsetX ?? 0) + deltaNormX,
+          offsetY: (cur.offsetY ?? 0) + deltaNormY,
+        });
+      }
+    },
+    [
+      extractedHead,
+      viewMode,
+      globalRefTemplateId,
+      activeTemplate.id,
+      alignmentScope,
+      globalHeadAlignment,
+      individualHeadAlignments,
+      setGlobalHeadAlignment,
+      setIndividualHeadAlignment,
+    ]
+  );
+
+  const resetGlobalAlignment = useCallback(() => {
+    setGlobalHeadAlignment({ scaleMultiplier: 1.0, rotationDelta: 0, offsetX: 0, offsetY: 0 });
+  }, [setGlobalHeadAlignment]);
+
+  const resetIndividualAlignment = useCallback(
+    (templateId: string) => {
+      setIndividualHeadAlignment(templateId, null);
+    },
+    [setIndividualHeadAlignment]
+  );
+
+  const resetAllAlignment = useCallback(() => {
+    if (!extractedHead) return;
+    const neutralGlobal = { scaleMultiplier: 1.0, rotationDelta: 0, offsetX: 0, offsetY: 0 };
+    setGlobalHeadAlignmentState(neutralGlobal);
+    setIndividualHeadAlignmentsState({});
+    setCalibratedChinState(null);
+
+    const baselineTransforms = computeAllTransforms(extractedHead, neutralGlobal, {}, null);
+    setTemplateTransforms(baselineTransforms);
+    if (baselineTransforms[activeTemplate.id]) {
+      setHeadTransform(baselineTransforms[activeTemplate.id]);
+    }
+    const refId = viewMode === 'global_alignment' ? globalRefTemplateId : activeTemplate.id;
+    triggerPackPreviewsUpdate(
+      extractedHead,
+      baselineTransforms,
+      templateBorderThicknesses,
+      borderThickness,
+      smoothOutlineLevel,
+      refId
+    );
+  }, [
+    extractedHead,
+    computeAllTransforms,
+    activeTemplate.id,
+    viewMode,
+    globalRefTemplateId,
+    triggerPackPreviewsUpdate,
+    templateBorderThicknesses,
+    borderThickness,
+    smoothOutlineLevel,
+  ]);
+
   const updateHeadTransform = useCallback(
     (update: {
       centerX?: number;
@@ -402,42 +803,53 @@ export function useCartoonMode(): UseCartoonModeReturn {
     }) => {
       if (!headTransform || !extractedHead) return;
 
-      const newTf: HeadTransform = {
-        ...headTransform,
-        centerX: update.centerX !== undefined ? Math.round(update.centerX) : headTransform.centerX,
-        centerY: update.centerY !== undefined ? Math.round(update.centerY) : headTransform.centerY,
-        scale: update.scale !== undefined ? parseFloat(update.scale.toFixed(4)) : headTransform.scale,
-        rotationDegrees:
-          update.rotationDegrees !== undefined
-            ? parseFloat(update.rotationDegrees.toFixed(2))
-            : headTransform.rotationDegrees,
-        hairBehindBody:
-          update.hairBehindBody !== undefined ? update.hairBehindBody : headTransform.hairBehindBody,
-      };
+      const basePlacement = computeInitialHeadPlacement(activeTemplate, extractedHead, calibratedChin);
+      const faceH = (activeTemplate.headSlot.targetFaceH ?? 0.254) * activeTemplate.canvas.height;
+      const curInd = individualHeadAlignments[activeTemplate.id] || {};
 
-      const customBorder = templateBorderThicknesses[activeTemplate.id] ?? borderThickness;
-      setHeadTransform(newTf);
-      setTemplateTransforms((prev) => ({ ...prev, [activeTemplate.id]: newTf }));
-      recomposite(activeTemplate, extractedHead, newTf, customBorder, smoothOutlineLevel);
+      let newScaleMultiplier = curInd.scaleMultiplier;
+      if (update.scale !== undefined) {
+        const baseScale = basePlacement.scale * globalHeadAlignment.scaleMultiplier;
+        newScaleMultiplier = baseScale > 0 ? parseFloat((update.scale / baseScale).toFixed(4)) : 1.0;
+      }
+
+      let newRotationDelta = curInd.rotationDelta;
+      if (update.rotationDegrees !== undefined) {
+        const baseRot = basePlacement.rotationDegrees + globalHeadAlignment.rotationDelta;
+        newRotationDelta = parseFloat((update.rotationDegrees - baseRot).toFixed(2));
+      }
+
+      let newOffsetX = curInd.offsetX;
+      let newOffsetY = curInd.offsetY;
+      if (update.centerX !== undefined && update.centerY !== undefined) {
+        const deltaX = update.centerX - headTransform.centerX;
+        const deltaY = update.centerY - headTransform.centerY;
+        newOffsetX = (curInd.offsetX ?? 0) + deltaX / faceH;
+        newOffsetY = (curInd.offsetY ?? 0) + deltaY / faceH;
+      }
+
+      setIndividualHeadAlignment(activeTemplate.id, {
+        scaleMultiplier: newScaleMultiplier,
+        rotationDelta: newRotationDelta,
+        offsetX: newOffsetX,
+        offsetY: newOffsetY,
+        hairBehindBody: update.hairBehindBody !== undefined ? update.hairBehindBody : curInd.hairBehindBody,
+      });
     },
-    [headTransform, extractedHead, activeTemplate, templateBorderThicknesses, borderThickness, smoothOutlineLevel, recomposite]
+    [
+      headTransform,
+      extractedHead,
+      activeTemplate,
+      calibratedChin,
+      individualHeadAlignments,
+      globalHeadAlignment,
+      setIndividualHeadAlignment,
+    ]
   );
 
   const resetPlacement = useCallback(() => {
-    if (!headTransform || !extractedHead) return;
-    const resetTf: HeadTransform = {
-      centerX: headTransform.autoPlacement.centerX,
-      centerY: headTransform.autoPlacement.centerY,
-      scale: headTransform.autoPlacement.scale,
-      rotationDegrees: headTransform.autoPlacement.rotationDegrees,
-      hairBehindBody: headTransform.autoPlacement.hairBehindBody,
-      autoPlacement: headTransform.autoPlacement,
-    };
-    const customBorder = templateBorderThicknesses[activeTemplate.id] ?? borderThickness;
-    setHeadTransform(resetTf);
-    setTemplateTransforms((prev) => ({ ...prev, [activeTemplate.id]: resetTf }));
-    recomposite(activeTemplate, extractedHead, resetTf, customBorder, smoothOutlineLevel);
-  }, [headTransform, extractedHead, activeTemplate, templateBorderThicknesses, borderThickness, smoothOutlineLevel, recomposite]);
+    resetIndividualAlignment(activeTemplate.id);
+  }, [resetIndividualAlignment, activeTemplate.id]);
 
   // Set individual border thickness for a specific template (or null to revert to global)
   const setTemplateBorderThickness = useCallback(
@@ -899,7 +1311,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
     if (!selfieDataUrl || !headTransform || !extractedHead) return;
 
     const proj: CartoonProjectData = {
-      version: 4,
+      version: 5,
       appMode: 'cartoon',
       templateId: activeTemplate.id,
       selfieDataUrl,
@@ -918,6 +1330,9 @@ export function useCartoonMode(): UseCartoonModeReturn {
       templateTransforms,
       templateBorderThicknesses,
       selectedTemplateIds,
+      globalHeadAlignment,
+      individualHeadAlignments,
+      calibratedChin,
       dateModified: new Date().toISOString(),
     };
 
@@ -936,6 +1351,9 @@ export function useCartoonMode(): UseCartoonModeReturn {
     templateTransforms,
     templateBorderThicknesses,
     selectedTemplateIds,
+    globalHeadAlignment,
+    individualHeadAlignments,
+    calibratedChin,
   ]);
 
   const loadProjectJson = useCallback(
@@ -951,6 +1369,21 @@ export function useCartoonMode(): UseCartoonModeReturn {
         setBorderThicknessState(proj.borderThickness ?? 24);
         setSmoothOutlineLevel(proj.smoothOutlineLevel ?? 2);
         setSelfieDataUrl(proj.selfieDataUrl);
+
+        const gAlign: GlobalHeadAlignment = proj.globalHeadAlignment || {
+          scaleMultiplier: 1.0,
+          rotationDelta: 0,
+          offsetX: 0,
+          offsetY: 0,
+        };
+        const iAligns: Record<string, IndividualHeadAlignment> = proj.individualHeadAlignments || {};
+        const cChin = proj.calibratedChin || null;
+
+        setGlobalHeadAlignmentState(gAlign);
+        setIndividualHeadAlignmentsState(iAligns);
+        setCalibratedChinState(cChin);
+        setAlignmentScope('all');
+        setGlobalRefTemplateId(tpl.id);
 
         if (proj.headPngDataUrl && proj.headCropBounds) {
           // Fast-path: deterministic lossless restoration without re-segmentation
@@ -1022,17 +1455,35 @@ export function useCartoonMode(): UseCartoonModeReturn {
           setUndoStack([]);
           setRedoStack([]);
 
-          // Restore template transforms or compute defaults for v3 projects
-          const restoredTransforms: Record<string, HeadTransform> = proj.templateTransforms || {};
-          for (const item of CARTOON_REACTIONS_PACK) {
-            if (!restoredTransforms[item.id]) {
-              if (item.id === tpl.id) {
-                restoredTransforms[item.id] = proj.headTransform;
-              } else {
-                restoredTransforms[item.id] = computeInitialHeadPlacement(item, restoredHead);
+          let finalAlignments: Record<string, IndividualHeadAlignment> = { ...iAligns };
+          if ((proj.version ?? 0) < 5 || !proj.individualHeadAlignments) {
+            for (const t of CARTOON_REACTIONS_PACK) {
+              const savedTf =
+                (proj.templateTransforms && proj.templateTransforms[t.id]) ||
+                (t.id === (proj.templateId || tpl.id) ? proj.headTransform : null);
+              if (savedTf) {
+                const auto = computeInitialHeadPlacement(t, restoredHead, cChin);
+                const hasDiff =
+                  savedTf.centerX !== auto.centerX ||
+                  savedTf.centerY !== auto.centerY ||
+                  Math.abs(savedTf.scale - auto.scale) > 0.0001 ||
+                  Math.abs(savedTf.rotationDegrees - auto.rotationDegrees) > 0.01 ||
+                  (savedTf.hairBehindBody !== undefined && savedTf.hairBehindBody !== auto.hairBehindBody);
+
+                if (hasDiff) {
+                  finalAlignments[t.id] = convertLegacyTransformToIndividualAlignment(
+                    t,
+                    restoredHead,
+                    savedTf,
+                    cChin
+                  );
+                }
               }
             }
+            setIndividualHeadAlignmentsState(finalAlignments);
           }
+
+          const restoredTransforms = computeAllTransforms(restoredHead, gAlign, finalAlignments, cChin);
           setTemplateTransforms(restoredTransforms);
 
           const curTransform = restoredTransforms[tpl.id] || proj.headTransform;
@@ -1080,7 +1531,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
         setError('Failed to load cartoon project: ' + err.message);
       }
     },
-    [recomposite, renderAllPackPreviews]
+    [recomposite, renderAllPackPreviews, computeAllTransforms]
   );
 
   if (typeof window !== 'undefined') {
@@ -1091,6 +1542,12 @@ export function useCartoonMode(): UseCartoonModeReturn {
       templateBorderThicknesses,
       borderThickness,
       selectedTemplateIds,
+      globalHeadAlignment,
+      individualHeadAlignments,
+      calibratedChin,
+      alignmentScope,
+      globalRefTemplateId,
+      viewMode,
     };
   }
 
@@ -1118,12 +1575,27 @@ export function useCartoonMode(): UseCartoonModeReturn {
     templateBorderThicknesses,
     isExportingZip,
 
+    globalHeadAlignment,
+    individualHeadAlignments,
+    calibratedChin,
+    alignmentScope,
+    globalRefTemplateId,
+
     toolMode,
     brushSize,
     canUndo: undoStack.length > 0,
     canRedo: redoStack.length > 0,
 
     setViewMode,
+    setAlignmentScope,
+    setGlobalRefTemplateId,
+    setGlobalHeadAlignment,
+    setIndividualHeadAlignment,
+    setCalibratedChin,
+    applyAlignmentDrag,
+    resetGlobalAlignment,
+    resetIndividualAlignment,
+    resetAllAlignment,
     selectTemplateForEdit,
     toggleTemplateSelection,
     selectAllTemplates,
