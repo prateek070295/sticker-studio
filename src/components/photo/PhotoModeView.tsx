@@ -68,6 +68,14 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
     bottomFinish,
     bottomCurveRadius,
     touchesBottomEdge,
+    qualityMode,
+    decontaminateEdge,
+    hairDetail,
+    accessoryMerge,
+    setQualityMode,
+    setDecontaminateEdge,
+    setHairDetail,
+    setAccessoryMerge,
     setPreviewBg,
     setViewMode,
     setToolMode,
@@ -415,7 +423,8 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
 
   const getBgStyle = () => {
     if (previewBg === 'dark') return 'bg-slate-900';
-    if (previewBg === 'light') return 'bg-white';
+    if (previewBg === 'light' || previewBg === 'white') return 'bg-white';
+    if (previewBg === 'grey') return 'bg-neutral-600';
     if (previewBg === 'saturated') return 'bg-cyan-500';
     return 'bg-checker';
   };
@@ -1017,6 +1026,98 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
             </div>
           )}
 
+          {/* V1.7 Photographic Matting & Edge Quality */}
+          {mask && (
+            <div className="space-y-3 p-3 bg-neutral-50 rounded-xl border border-neutral-200">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-neutral-700 uppercase tracking-wider">
+                  Matting Quality
+                </span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-sky-100 text-sky-800">
+                  {qualityMode === 'fast' ? 'Fast (V1.6)' : qualityMode === 'better' ? 'Guided Matte' : 'Studio Matting'}
+                </span>
+              </div>
+
+              {/* Quality Mode Segmented Buttons */}
+              <div className="grid grid-cols-3 gap-1 p-1 bg-neutral-100 rounded-xl border border-neutral-200">
+                <button
+                  onClick={() => setQualityMode('fast')}
+                  className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                    qualityMode === 'fast' ? 'bg-white shadow-xs text-neutral-900 font-semibold' : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
+                  title="Fast baseline segmentation (V1.6)"
+                >
+                  Fast
+                </button>
+                <button
+                  onClick={() => setQualityMode('better')}
+                  className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                    qualityMode === 'better' ? 'bg-white shadow-xs text-neutral-900 font-semibold' : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
+                  title="Continuous guided subpixel matting"
+                >
+                  Better
+                </button>
+                <button
+                  onClick={() => setQualityMode('best')}
+                  className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                    qualityMode === 'best' ? 'bg-white shadow-xs text-neutral-900 font-semibold' : 'text-neutral-600 hover:text-neutral-900'
+                  }`}
+                  title="Guided matting with color decontamination"
+                >
+                  Best
+                </button>
+              </div>
+
+              {/* Hair & Fine Detail Sensitivity Slider */}
+              {qualityMode !== 'fast' && (
+                <div className="space-y-1 pt-1">
+                  <div className="flex justify-between text-xs text-neutral-600">
+                    <span>Hair & Edge Detail</span>
+                    <span className="font-mono">{hairDetail}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1"
+                    max="10"
+                    value={hairDetail}
+                    onChange={(e) => setHairDetail(Number(e.target.value))}
+                    className="w-full accent-sky-500 h-1.5 bg-neutral-200 rounded-lg cursor-pointer"
+                  />
+                  <div className="flex justify-between text-[10px] text-neutral-400">
+                    <span>Subtle</span>
+                    <span className="text-sky-600 font-semibold">Standard (5)</span>
+                    <span>Max Hair Wisps</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Color Decontamination Checkbox */}
+              {qualityMode !== 'fast' && (
+                <label className="flex items-center gap-2 text-xs text-neutral-700 cursor-pointer pt-1">
+                  <input
+                    type="checkbox"
+                    checked={decontaminateEdge}
+                    onChange={(e) => setDecontaminateEdge(e.target.checked)}
+                    className="rounded text-sky-600 focus:ring-sky-500 cursor-pointer"
+                  />
+                  <span>Decontaminate background color halos</span>
+                </label>
+              )}
+
+              {/* Attached Accessories Merge Checkbox */}
+              <label className="flex items-center gap-2 text-xs text-neutral-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={accessoryMerge}
+                  onChange={(e) => setAccessoryMerge(e.target.checked)}
+                  className="rounded text-sky-600 focus:ring-sky-500 cursor-pointer"
+                />
+                <span>Preserve hair flowers & attached accessories</span>
+              </label>
+            </div>
+          )}
+
           {/* 5. White Border Thickness Slider */}
           {mask && (
             <div className="space-y-2">
@@ -1217,7 +1318,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
             <span className="text-xs font-bold text-neutral-700 uppercase tracking-wider">
               Preview Background
             </span>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-3 gap-1.5">
               <button
                 onClick={() => setPreviewBg('checker')}
                 className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${
@@ -1237,6 +1338,15 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                 <span>Light</span>
               </button>
               <button
+                onClick={() => setPreviewBg('white')}
+                className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${
+                  previewBg === 'white' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
+                }`}
+              >
+                <div className="w-4 h-4 rounded-full border border-neutral-300 bg-white shadow-inner" />
+                <span>White</span>
+              </button>
+              <button
                 onClick={() => setPreviewBg('dark')}
                 className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${
                   previewBg === 'dark' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
@@ -1244,6 +1354,15 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
               >
                 <div className="w-4 h-4 rounded-full border border-neutral-700 bg-slate-900" />
                 <span>Dark</span>
+              </button>
+              <button
+                onClick={() => setPreviewBg('grey')}
+                className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${
+                  previewBg === 'grey' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
+                }`}
+              >
+                <div className="w-4 h-4 rounded-full border border-neutral-400 bg-neutral-500" />
+                <span>Grey</span>
               </button>
               <button
                 onClick={() => setPreviewBg('saturated')}

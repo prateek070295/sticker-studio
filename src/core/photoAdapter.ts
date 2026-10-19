@@ -9,6 +9,8 @@ import { buildGroupDistanceField, compositeSticker } from './composer';
 import { computeEuclideanDistanceTransform } from './edt';
 import { analyzeComponents } from './components';
 import { refineArtworkAlpha } from './artworkAlphaRefinement';
+import { refinePhotoAlphaMatte } from './photoMatting';
+import { mergeAttachedAccessories } from './accessoryAttacher';
 
 export interface PhotoFinishingOptions {
   edgeTrim?: number; // 0 to 10 px
@@ -17,6 +19,13 @@ export interface PhotoFinishingOptions {
   smoothOutline?: number; // 0 to 10, default 0 (recommended 1-2 for portraits)
   artworkEdgeSmoothness?: number; // 0 to 10, default 0 (subtle 1-2, moderate 3-5, strong 6-10)
   artworkEdgeFeather?: number; // 0 to 3 px, default 0 (fractional 0.5 px steps)
+  qualityMode?: 'fast' | 'better' | 'best';
+  candidateAlgorithm?: 'candidate-a' | 'candidate-b' | 'candidate-c';
+  decontaminateEdge?: boolean;
+  hairDetail?: number;
+  accessoryMerge?: boolean;
+  confidenceMap?: Float32Array;
+  faceBounds?: BoundingBox;
 }
 
 export interface PhotoComposedResult {
@@ -29,6 +38,8 @@ export interface PhotoComposedResult {
   whiteBackedHeight: number;
   whiteBackedBounds: BoundingBox;
   bounds: BoundingBox;
+  trimap?: Uint8Array;
+  mattingDurationMs?: number;
 }
 
 export function composePhotoCutout(
@@ -40,9 +51,10 @@ export function composePhotoCutout(
   padding: number = 60,
   smoothOutline: number = 0,
   artworkEdgeSmoothness: number = 0,
-  artworkEdgeFeather: number = 0
+  artworkEdgeFeather: number = 0,
+  finishingOptions?: PhotoFinishingOptions
 ): PhotoComposedResult {
-  // 1. Calculate bounding box of the mask in source coordinates
+  // 1. Calculate preliminary bounding box of the input mask
   let minX = sourceWidth;
   let maxX = -1;
   let minY = sourceHeight;
@@ -61,7 +73,6 @@ export function composePhotoCutout(
   }
 
   if (maxX < minX || maxY < minY) {
-    // Empty mask
     const emptyBox = { x: 0, y: 0, width: 0, height: 0 };
     return {
       artworkOnlyRgba: new Uint8ClampedArray(0),
@@ -76,30 +87,94 @@ export function composePhotoCutout(
     };
   }
 
-  const bounds: BoundingBox = {
+  const initialBounds: BoundingBox = {
     x: minX,
     y: minY,
     width: maxX - minX + 1,
     height: maxY - minY + 1,
   };
 
-  // 2. Build isolated labelMap (label 1 for mask) and refined alphaMask (0..255)
-  const totalPixels = sourceWidth * sourceHeight;
-  const labelMap = new Uint16Array(totalPixels);
-
-  for (let i = 0; i < totalPixels; i++) {
-    if (mask[i] > 0) {
-      labelMap[i] = 1;
+  // 2. Handle Attached Accessories (Hair flowers, clips, earrings)
+  let effectiveMask = mask;
+  if (finishingOptions?.accessoryMerge) {
+    const merged = mergeAttachedAccessories(mask, sourceWidth, sourceHeight, initialBounds);
+    if (merged.attachedCount > 0) {
+      effectiveMask = merged.mask;
     }
   }
 
-  const alphaMask = refineArtworkAlpha(
-    mask,
-    sourceWidth,
-    sourceHeight,
-    artworkEdgeSmoothness,
-    artworkEdgeFeather
-  );
+  // 3. Resolve Alpha Matte & Color Decontamination
+  const totalPixels = sourceWidth * sourceHeight;
+  let alphaMask: Uint8Array;
+  let effectiveRgba = sourceRgba;
+  let trimap: Uint8Array | undefined;
+  let mattingDurationMs: number | undefined;
+
+  const qualityMode = finishingOptions?.qualityMode;
+  const candidateAlgo = finishingOptions?.candidateAlgorithm;
+
+  if (qualityMode === 'better' || qualityMode === 'best' || candidateAlgo === 'candidate-b' || candidateAlgo === 'candidate-c') {
+    const matting = refinePhotoAlphaMatte(
+      sourceRgba,
+      effectiveMask,
+      sourceWidth,
+      sourceHeight,
+      {
+        qualityMode,
+        candidateAlgorithm: candidateAlgo,
+        smoothness: artworkEdgeSmoothness,
+        feather: artworkEdgeFeather,
+        hairDetail: finishingOptions?.hairDetail ?? 5,
+        decontaminateEdge: finishingOptions?.decontaminateEdge ?? true,
+        confidenceMap: finishingOptions?.confidenceMap,
+        faceBounds: finishingOptions?.faceBounds,
+      }
+    );
+    alphaMask = matting.alpha;
+    trimap = matting.trimap;
+    mattingDurationMs = matting.mattingDurationMs;
+    if (matting.decontaminatedRgba) {
+      effectiveRgba = matting.decontaminatedRgba;
+    }
+  } else {
+    alphaMask = refineArtworkAlpha(
+      effectiveMask,
+      sourceWidth,
+      sourceHeight,
+      artworkEdgeSmoothness,
+      artworkEdgeFeather
+    );
+  }
+
+  // 4. Build Authoritative Photo Support Envelope
+  // Pixels with legitimate recovered alpha (alpha > 0) must be included in labelMap
+  // so compositeSticker does not truncate fractional edge alpha outside the coarse mask.
+  const labelMap = new Uint16Array(totalPixels);
+  let finalMinX = sourceWidth;
+  let finalMaxX = -1;
+  let finalMinY = sourceHeight;
+  let finalMaxY = -1;
+
+  for (let y = 0; y < sourceHeight; y++) {
+    const rowOffset = y * sourceWidth;
+    for (let x = 0; x < sourceWidth; x++) {
+      const idx = rowOffset + x;
+      if (alphaMask[idx] > 0) {
+        labelMap[idx] = 1;
+        if (x < finalMinX) finalMinX = x;
+        if (x > finalMaxX) finalMaxX = x;
+        if (y < finalMinY) finalMinY = y;
+        if (y > finalMaxY) finalMaxY = y;
+      }
+    }
+  }
+
+  const bounds: BoundingBox = {
+    x: Math.min(minX, finalMinX < sourceWidth ? finalMinX : minX),
+    y: Math.min(minY, finalMinY < sourceHeight ? finalMinY : minY),
+    width: Math.max(maxX, finalMaxX) - Math.min(minX, finalMinX < sourceWidth ? finalMinX : minX) + 1,
+    height: Math.max(maxY, finalMaxY) - Math.min(minY, finalMinY < sourceHeight ? finalMinY : minY) + 1,
+  };
 
   const compId = 'photo_cutout_comp';
   const groupId = 'photo_cutout_group';
@@ -151,7 +226,7 @@ export function composePhotoCutout(
     compMap,
     labelMap,
     alphaMask,
-    sourceRgba,
+    effectiveRgba,
     sourceWidth,
     sourceHeight,
     distField,
@@ -170,7 +245,7 @@ export function composePhotoCutout(
     compMap,
     labelMap,
     alphaMask,
-    sourceRgba,
+    effectiveRgba,
     sourceWidth,
     sourceHeight,
     distField,
@@ -203,6 +278,8 @@ export function composePhotoCutout(
       height: whiteBacked.croppedHeight,
     },
     bounds,
+    trimap,
+    mattingDurationMs,
   };
 }
 

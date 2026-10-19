@@ -48,7 +48,7 @@ export interface ProjectSaveState {
   projectType?: 'sheet' | 'photo';
   photoSettings?: {
     borderThickness: number;
-    previewBg: 'checker' | 'dark' | 'light' | 'saturated';
+    previewBg: 'checker' | 'dark' | 'light' | 'saturated' | 'white' | 'grey';
     hasRemovedBackground: boolean;
     viewMode?: 'sticker' | 'artwork' | 'before-after' | 'original';
     personRegions?: import('../types').SerializedPersonRegion[];
@@ -61,6 +61,10 @@ export interface ProjectSaveState {
     smoothOutline?: number;
     artworkEdgeSmoothness?: number;
     artworkEdgeFeather?: number;
+    qualityMode?: 'fast' | 'better' | 'best';
+    decontaminateEdge?: boolean;
+    hairDetail?: number;
+    accessoryMerge?: boolean;
   };
 }
 

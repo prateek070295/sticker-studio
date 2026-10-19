@@ -14,6 +14,7 @@ test-output/
 .test-fixtures/
 .photo-review-handoff/
 docs/diagnosis*/
+docs/v1.7_matting_investigation/
 scripts/photo_prototype/models/
 scripts/photo_prototype/vendor/
 *.bin

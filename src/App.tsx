@@ -250,7 +250,11 @@ export default function App() {
         viewMode={viewMode}
         onViewModeChange={setViewMode}
         previewBg={appMode === 'photo' ? photo.previewBg : previewBg}
-        onPreviewBgChange={appMode === 'photo' ? photo.setPreviewBg : setPreviewBg}
+        onPreviewBgChange={appMode === 'photo' ? photo.setPreviewBg : (bg) => {
+          if (bg === 'checker' || bg === 'dark' || bg === 'light' || bg === 'saturated') {
+            setPreviewBg(bg);
+          }
+        }}
         canUndo={appMode === 'photo' ? photo.canUndo : canUndo}
         canRedo={appMode === 'photo' ? photo.canRedo : canRedo}
         onUndo={appMode === 'photo' ? photo.undo : undo}

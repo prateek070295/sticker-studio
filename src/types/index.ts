@@ -94,6 +94,7 @@ export interface PersonRegion {
   isUncertain?: boolean;
   cropBounds?: BoundingBox;
   cropMask?: Uint8Array; // Binary mask (cropBounds.width * cropBounds.height)
+  cropConfidence?: Float32Array; // Continuous model probabilities 0.0 .. 1.0
 }
 
 export interface SerializedPersonRegion {
@@ -225,7 +226,7 @@ export interface ProjectMetadata {
   gridConfig?: GridSheetConfig;
   photoSettings?: {
     borderThickness: number;
-    previewBg: 'checker' | 'dark' | 'light' | 'saturated';
+    previewBg: 'checker' | 'dark' | 'light' | 'saturated' | 'white' | 'grey';
     hasRemovedBackground: boolean;
     viewMode?: PhotoViewMode;
     personRegions?: SerializedPersonRegion[];
@@ -238,6 +239,10 @@ export interface ProjectMetadata {
     smoothOutline?: number;
     artworkEdgeSmoothness?: number;
     artworkEdgeFeather?: number;
+    qualityMode?: 'fast' | 'better' | 'best';
+    decontaminateEdge?: boolean;
+    hairDetail?: number;
+    accessoryMerge?: boolean;
   };
 }
 

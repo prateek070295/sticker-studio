@@ -16,6 +16,7 @@ import {
   detectPeopleInPhoto,
   segmentPersonCrop,
   combinePersonRegions,
+  combinePersonConfidence,
   DEFAULT_MIN_PERSON_AREA_RATIO,
   DEFAULT_CROP_MARGIN_RATIO
 } from '../core/mediaPipeSegmenter';
@@ -27,7 +28,7 @@ export interface UsePhotoModeReturn {
   mask: Uint8Array | null;
   baseAiMask: Uint8Array | null;
   borderThickness: number;
-  previewBg: 'checker' | 'dark' | 'light' | 'saturated';
+  previewBg: 'checker' | 'dark' | 'light' | 'saturated' | 'white' | 'grey';
   viewMode: PhotoViewMode;
   toolMode: PhotoToolMode;
   brushSize: number;
@@ -38,6 +39,10 @@ export interface UsePhotoModeReturn {
   bottomFinish: 'flat' | 'rounded' | 'curved';
   bottomCurveRadius: number;
   touchesBottomEdge: boolean;
+  qualityMode: 'fast' | 'better' | 'best';
+  decontaminateEdge: boolean;
+  hairDetail: number;
+  accessoryMerge: boolean;
   isProcessing: boolean;
   progressMessage: string;
   modelStatus: 'idle' | 'loading' | 'ready' | 'error';
@@ -69,8 +74,12 @@ export interface UsePhotoModeReturn {
   setArtworkEdgeFeather: (val: number) => void;
   setBottomFinish: (mode: 'flat' | 'rounded' | 'curved') => void;
   setBottomCurveRadius: (val: number) => void;
+  setQualityMode: (mode: 'fast' | 'better' | 'best') => void;
+  setDecontaminateEdge: (val: boolean) => void;
+  setHairDetail: (val: number) => void;
+  setAccessoryMerge: (val: boolean) => void;
   cleanFragments: (minArea?: number) => void;
-  setPreviewBg: (bg: 'checker' | 'dark' | 'light' | 'saturated') => void;
+  setPreviewBg: (bg: 'checker' | 'dark' | 'light' | 'saturated' | 'white' | 'grey') => void;
   setViewMode: (mode: PhotoViewMode) => void;
   setToolMode: (mode: PhotoToolMode) => void;
   setBrushSize: (size: number) => void;
@@ -164,7 +173,11 @@ export function usePhotoMode(): UsePhotoModeReturn {
   const [artworkEdgeFeather, setArtworkEdgeFeatherState] = useState<number>(0);
   const [bottomFinish, setBottomFinish] = useState<'flat' | 'rounded' | 'curved'>('flat');
   const [bottomCurveRadius, setBottomCurveRadiusState] = useState<number>(30);
-  const [previewBg, setPreviewBg] = useState<'checker' | 'dark' | 'light' | 'saturated'>('checker');
+  const [qualityMode, setQualityModeState] = useState<'fast' | 'better' | 'best'>('better');
+  const [decontaminateEdge, setDecontaminateEdgeState] = useState<boolean>(true);
+  const [hairDetail, setHairDetailState] = useState<number>(5);
+  const [accessoryMerge, setAccessoryMergeState] = useState<boolean>(true);
+  const [previewBg, setPreviewBg] = useState<'checker' | 'dark' | 'light' | 'saturated' | 'white' | 'grey'>('checker');
   const [viewMode, setViewMode] = useState<PhotoViewMode>('sticker');
   const [toolMode, setToolMode] = useState<PhotoToolMode>('pan');
   const [brushSize, setBrushSize] = useState<number>(30);
@@ -228,6 +241,11 @@ export function usePhotoMode(): UsePhotoModeReturn {
       artworkEdgeSmoothness,
       artworkEdgeFeather,
     });
+
+    const confidenceMap = personRegions.length > 0
+      ? combinePersonConfidence(personRegions, W, H)
+      : undefined;
+
     const res = composePhotoCutout(
       finishedMask,
       sourceImage.data,
@@ -237,10 +255,38 @@ export function usePhotoMode(): UsePhotoModeReturn {
       60,
       smoothOutline,
       artworkEdgeSmoothness,
-      artworkEdgeFeather
+      artworkEdgeFeather,
+      {
+        edgeTrim,
+        bottomFinish,
+        bottomCurveRadius,
+        smoothOutline,
+        artworkEdgeSmoothness,
+        artworkEdgeFeather,
+        qualityMode,
+        decontaminateEdge,
+        hairDetail,
+        accessoryMerge,
+        confidenceMap,
+      }
     );
     setComposedResult(res);
-  }, [sourceImage, mask, borderThickness, edgeTrim, bottomFinish, bottomCurveRadius, smoothOutline, artworkEdgeSmoothness, artworkEdgeFeather]);
+  }, [
+    sourceImage,
+    mask,
+    borderThickness,
+    edgeTrim,
+    bottomFinish,
+    bottomCurveRadius,
+    smoothOutline,
+    artworkEdgeSmoothness,
+    artworkEdgeFeather,
+    qualityMode,
+    decontaminateEdge,
+    hairDetail,
+    accessoryMerge,
+    personRegions,
+  ]);
 
   // Load photo file
   const importPhoto = useCallback(async (file: File) => {
@@ -834,11 +880,37 @@ export function usePhotoMode(): UsePhotoModeReturn {
         smoothOutline,
         artworkEdgeSmoothness,
         artworkEdgeFeather,
+        qualityMode,
+        decontaminateEdge,
+        hairDetail,
+        accessoryMerge,
       },
     });
 
     downloadBlob(zipBlob, `${getBaseName()}.stickerstudio`);
-  }, [sourceImage, mask, borderThickness, previewBg, viewMode, personRegions, selectedRegionId, isReviewMode, manualDelta, edgeTrim, bottomFinish, bottomCurveRadius, smoothOutline, artworkEdgeSmoothness, artworkEdgeFeather, getBaseName, downloadBlob]);
+  }, [
+    sourceImage,
+    mask,
+    borderThickness,
+    previewBg,
+    viewMode,
+    personRegions,
+    selectedRegionId,
+    isReviewMode,
+    manualDelta,
+    edgeTrim,
+    bottomFinish,
+    bottomCurveRadius,
+    smoothOutline,
+    artworkEdgeSmoothness,
+    artworkEdgeFeather,
+    qualityMode,
+    decontaminateEdge,
+    hairDetail,
+    accessoryMerge,
+    getBaseName,
+    downloadBlob,
+  ]);
 
   // Load Photo Project
   const loadPhotoProject = useCallback((loaded: LoadedProjectData) => {
@@ -869,6 +941,10 @@ export function usePhotoMode(): UsePhotoModeReturn {
       setArtworkEdgeFeatherState(loaded.metadata.photoSettings.artworkEdgeFeather ?? 0);
       setBottomFinish(loaded.metadata.photoSettings.bottomFinish ?? 'flat');
       setBottomCurveRadiusState(loaded.metadata.photoSettings.bottomCurveRadius ?? 30);
+      setQualityModeState(loaded.metadata.photoSettings.qualityMode ?? 'better');
+      setDecontaminateEdgeState(loaded.metadata.photoSettings.decontaminateEdge ?? true);
+      setHairDetailState(loaded.metadata.photoSettings.hairDetail ?? 5);
+      setAccessoryMergeState(loaded.metadata.photoSettings.accessoryMerge ?? true);
 
       if (loaded.metadata.photoSettings.manualDelta) {
         const u8 = base64ToUint8(loaded.metadata.photoSettings.manualDelta);
@@ -916,9 +992,29 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setArtworkEdgeFeatherState(0);
     setBottomFinish('flat');
     setBottomCurveRadiusState(30);
+    setQualityModeState('better');
+    setDecontaminateEdgeState(true);
+    setHairDetailState(5);
+    setAccessoryMergeState(true);
     undoStackRef.current = [];
     redoStackRef.current = [];
     setHistoryVersion(v => v + 1);
+  }, []);
+
+  const setQualityMode = useCallback((mode: 'fast' | 'better' | 'best') => {
+    setQualityModeState(mode);
+  }, []);
+
+  const setDecontaminateEdge = useCallback((val: boolean) => {
+    setDecontaminateEdgeState(val);
+  }, []);
+
+  const setHairDetail = useCallback((val: number) => {
+    setHairDetailState(val);
+  }, []);
+
+  const setAccessoryMerge = useCallback((val: boolean) => {
+    setAccessoryMergeState(val);
   }, []);
 
   return {
@@ -938,6 +1034,10 @@ export function usePhotoMode(): UsePhotoModeReturn {
     bottomFinish,
     bottomCurveRadius,
     touchesBottomEdge,
+    qualityMode,
+    decontaminateEdge,
+    hairDetail,
+    accessoryMerge,
     isProcessing,
     progressMessage,
     modelStatus,
@@ -969,6 +1069,10 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setArtworkEdgeFeather,
     setBottomFinish,
     setBottomCurveRadius,
+    setQualityMode,
+    setDecontaminateEdge,
+    setHairDetail,
+    setAccessoryMerge,
     cleanFragments,
     setPreviewBg,
     setViewMode,

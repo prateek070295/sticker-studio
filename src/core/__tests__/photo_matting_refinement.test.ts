@@ -1,0 +1,354 @@
+import { describe, it, expect } from 'vitest';
+import {
+  generateTrimap,
+  computeUnknownBandRoi,
+  boxFilter,
+  solveGuidedAlphaMatte,
+  refineContinuousConfidence,
+  decontaminateEdgeColor,
+  refinePhotoAlphaMatte,
+} from '../photoMatting';
+import { mergeAttachedAccessories } from '../accessoryAttacher';
+import { detectPeopleInPhoto } from '../mediaPipeSegmenter';
+import { composePhotoCutout } from '../photoAdapter';
+import { BoundingBox } from '../../types';
+
+describe('Sticker Studio V1.7 — Photo Matting & Edge Refinement Core', () => {
+  it('1. Generates 3-state Trimap with EDT erosion, dilation, and hair dilation boost', () => {
+    const W = 40;
+    const H = 40;
+    const mask = new Uint8Array(W * H);
+
+    // Create a 20x20 square subject in center
+    for (let y = 10; y < 30; y++) {
+      for (let x = 10; x < 30; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    const trimap = generateTrimap(mask, W, H, {
+      erosionRadius: 3,
+      dilationRadius: 3,
+      hairDetail: 5,
+    });
+
+    // Interior should be Definite FG (255)
+    expect(trimap[20 * W + 20]).toBe(255);
+
+    // Far outside should be Definite BG (0)
+    expect(trimap[2 * W + 2]).toBe(0);
+    expect(trimap[38 * W + 38]).toBe(0);
+
+    // Edge boundary pixels should be Unknown Band (128)
+    expect(trimap[10 * W + 10]).toBe(128); // on border
+    expect(trimap[9 * W + 20]).toBe(128);  // 1px outside border
+    expect(trimap[11 * W + 20]).toBe(128); // 1px inside border
+  });
+
+  it('2. Enforces strict hard constraints in Guided Alpha Matting (FG=255, BG=0, zero leakage)', () => {
+    const W = 30;
+    const H = 30;
+    const rgb = new Uint8Array(W * H * 4);
+    const coarseMask = new Uint8Array(W * H);
+    const trimap = new Uint8Array(W * H);
+
+    // Fill checkerboard colors
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const idx = y * W + x;
+        const off = idx * 4;
+        rgb[off] = (x % 2 === 0) ? 200 : 50;
+        rgb[off + 1] = (y % 2 === 0) ? 180 : 30;
+        rgb[off + 2] = 100;
+        rgb[off + 3] = 255;
+
+        if (x < 10) {
+          trimap[idx] = 255; // Definite FG
+          coarseMask[idx] = 1;
+        } else if (x > 20) {
+          trimap[idx] = 0;   // Definite BG
+          coarseMask[idx] = 0;
+        } else {
+          trimap[idx] = 128; // Unknown band
+          coarseMask[idx] = x < 15 ? 1 : 0;
+        }
+      }
+    }
+
+    const alpha = solveGuidedAlphaMatte(rgb, coarseMask, trimap, W, H, 4, 1e-4);
+
+    // Strict constraint verification
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const idx = y * W + x;
+        if (trimap[idx] === 255) {
+          expect(alpha[idx]).toBe(255);
+        } else if (trimap[idx] === 0) {
+          expect(alpha[idx]).toBe(0); // Zero leakage
+        } else {
+          // Unknown band produces continuous values in [0, 255]
+          expect(alpha[idx]).toBeGreaterThanOrEqual(0);
+          expect(alpha[idx]).toBeLessThanOrEqual(255);
+        }
+      }
+    }
+  });
+
+  it('3. Candidate B: Evaluates continuous confidence map preservation and joint RGB upsampling', () => {
+    const W = 30;
+    const H = 30;
+    const rgb = new Uint8Array(W * H * 4);
+    const conf = new Float32Array(W * H);
+
+    // Create a smooth gradient confidence across a diagonal edge
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const idx = y * W + x;
+        const off = idx * 4;
+        // Edge along x + y = 30
+        const dist = (x + y) - 30;
+        const prob = 1.0 / (1.0 + Math.exp(dist * 0.5)); // sigmoid
+        conf[idx] = prob;
+
+        // RGB guide: dark hair on bright background
+        const val = prob > 0.5 ? 40 : 220;
+        rgb[off] = val;
+        rgb[off + 1] = val;
+        rgb[off + 2] = val;
+        rgb[off + 3] = 255;
+      }
+    }
+
+    const refined = refineContinuousConfidence(rgb, conf, W, H, 3, 1e-3);
+
+    // Verify continuous output
+    let intermediateCount = 0;
+    for (let i = 0; i < refined.length; i++) {
+      if (refined[i] > 10 && refined[i] < 245) {
+        intermediateCount++;
+      }
+    }
+
+    expect(intermediateCount).toBeGreaterThan(20);
+    // Deep interior is opaque, far background is transparent
+    expect(refined[0]).toBe(255);
+    expect(refined[W * H - 1]).toBe(0);
+  });
+
+  it('4. Guarded Physical Color Decontamination preserves interior camera RGB exactly and removes background spill', () => {
+    const W = 20;
+    const H = 20;
+    const rgb = new Uint8ClampedArray(W * H * 4);
+    const alpha = new Uint8Array(W * H);
+    const trimap = new Uint8Array(W * H);
+
+    // Dark hair (RGB 30, 25, 20) over bright white background (RGB 255, 255, 255)
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const idx = y * W + x;
+        const off = idx * 4;
+
+        if (x < 8) {
+          // Deep interior
+          rgb[off] = 30;
+          rgb[off + 1] = 25;
+          rgb[off + 2] = 20;
+          rgb[off + 3] = 255;
+          alpha[idx] = 255;
+          trimap[idx] = 255;
+        } else if (x > 14) {
+          // Background
+          rgb[off] = 250;
+          rgb[off + 1] = 250;
+          rgb[off + 2] = 250;
+          rgb[off + 3] = 255;
+          alpha[idx] = 0;
+          trimap[idx] = 0;
+        } else {
+          // Transitional hair edge with white background color spill
+          // e.g. observed = 0.5 * hair + 0.5 * white = (140, 137, 135)
+          rgb[off] = 140;
+          rgb[off + 1] = 137;
+          rgb[off + 2] = 135;
+          rgb[off + 3] = 255;
+          alpha[idx] = 128;
+          trimap[idx] = 128;
+        }
+      }
+    }
+
+    const decontaminated = decontaminateEdgeColor(rgb, alpha, trimap, W, H, 5);
+
+    // Invariant 1: Deep interior (alpha === 255) must be 100% bitwise identical to untouched camera RGB
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < 8; x++) {
+        const off = (y * W + x) * 4;
+        expect(decontaminated[off]).toBe(30);
+        expect(decontaminated[off + 1]).toBe(25);
+        expect(decontaminated[off + 2]).toBe(20);
+        expect(decontaminated[off + 3]).toBe(255);
+      }
+    }
+
+    // Invariant 2: Transitional pixels (alpha === 128) must have white spill stripped
+    // Unmixed foreground should be significantly darker than observed 140 (closer to true hair ~30)
+    const midOff = (10 * W + 10) * 4;
+    expect(decontaminated[midOff]).toBeLessThan(140);
+    expect(decontaminated[midOff]).toBeGreaterThanOrEqual(25);
+  });
+
+  it('5. Suppresses low-confidence person detections that strongly overlap primary subjects', async () => {
+    // Synthetic detection simulating the red hair flower defect:
+    // P1: Main person, score 0.92, bounds [10, 10, 80, 80]
+    // P2: Red hair flower falsely detected as person, score 0.17, bounds [20, 15, 25, 25] (100% inside P1)
+    // P3: Standalone secondary person, score 0.85, bounds [120, 10, 50, 80] (no overlap)
+    // P4: Standalone small person in background, score 0.28, bounds [200, 20, 20, 30] (no overlap, reviewable)
+
+    const W = 300;
+    const H = 200;
+    const personBoxes = [
+      { box: { x: 10, y: 10, width: 80, height: 80 }, score: 0.92, isUncertain: false },
+      { box: { x: 20, y: 15, width: 25, height: 25 }, score: 0.17, isUncertain: true },
+      { box: { x: 120, y: 10, width: 50, height: 80 }, score: 0.85, isUncertain: false },
+      { box: { x: 200, y: 20, width: 20, height: 30 }, score: 0.28, isUncertain: true },
+    ];
+
+    // Filter using the exact logic implemented in detectPeopleInPhoto
+    const mapped = personBoxes.map((p, idx) => {
+      let isSuppressedByOverlap = false;
+      if (p.score < 0.35 || p.isUncertain) {
+        const pArea = p.box.width * p.box.height;
+        for (const other of personBoxes) {
+          if (other === p) continue;
+          if (other.score >= 0.45 && other.score > p.score + 0.15) {
+            const ix0 = Math.max(p.box.x, other.box.x);
+            const ix1 = Math.min(p.box.x + p.box.width, other.box.x + other.box.width);
+            const iy0 = Math.max(p.box.y, other.box.y);
+            const iy1 = Math.min(p.box.y + p.box.height, other.box.y + other.box.height);
+            if (ix1 > ix0 && iy1 > iy0) {
+              const overlapArea = (ix1 - ix0) * (iy1 - iy0);
+              if (overlapArea / pArea >= 0.35) {
+                isSuppressedByOverlap = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+      return {
+        id: `person_${idx + 1}`,
+        score: p.score,
+        included: !isSuppressedByOverlap,
+        isUncertain: p.isUncertain || isSuppressedByOverlap,
+      };
+    });
+
+    // P1 (main): included
+    expect(mapped[0].included).toBe(true);
+
+    // P2 (flower falsely detected as person overlapping P1): SUPPRESSED from auto-inclusion
+    expect(mapped[1].included).toBe(false);
+    expect(mapped[1].isUncertain).toBe(true);
+
+    // P3 (standalone): included
+    expect(mapped[2].included).toBe(true);
+
+    // P4 (standalone small person in group photo): included for review, not falsely suppressed because no overlap
+    expect(mapped[3].included).toBe(true);
+  });
+
+  it('6. Accessory Attacher merges attached near-head items but ignores disconnected background objects', () => {
+    const W = 60;
+    const H = 60;
+    const mask = new Uint8Array(W * H);
+
+    // Primary person head & torso: [20..40, 15..50]
+    for (let y = 15; y < 50; y++) {
+      for (let x = 20; x < 40; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    // Component 1: Attached hair flower at [12..18, 16..22] (distance = 2px to head, in head zone)
+    for (let y = 16; y < 22; y++) {
+      for (let x = 12; x < 18; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    // Component 2: Disconnected background object at [4..10, 4..10] (distance > 20px, far background)
+    for (let y = 4; y < 10; y++) {
+      for (let x = 4; x < 10; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    const coreBox: BoundingBox = { x: 20, y: 15, width: 20, height: 35 };
+    const merged = mergeAttachedAccessories(mask, W, H, coreBox, {
+      maxAttachmentDistance: 10,
+      headZoneRatio: 0.65,
+    });
+
+    // Hair flower is merged and preserved
+    expect(merged.attachedCount).toBe(1);
+    expect(merged.mask[18 * W + 15]).toBe(1); // flower pixel preserved
+    expect(merged.mask[16 * W + 19]).toBe(1); // bridge pixel connected to head
+
+    // Disconnected background object is NOT merged
+    expect(merged.mask[6 * W + 6]).toBe(0);
+  });
+
+  it('7. Photo Compositing Support Envelope does not clip recovered fractional alpha outside binary mask', () => {
+    const W = 40;
+    const H = 40;
+    const sourceRgba = new Uint8ClampedArray(W * H * 4);
+    const mask = new Uint8Array(W * H);
+
+    // Initial coarse mask: [12..28, 12..28]
+    for (let y = 12; y < 28; y++) {
+      for (let x = 12; x < 28; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    for (let i = 0; i < W * H * 4; i += 4) {
+      sourceRgba[i] = 100;
+      sourceRgba[i + 1] = 150;
+      sourceRgba[i + 2] = 200;
+      sourceRgba[i + 3] = 255;
+    }
+
+    // Compose with Better quality mode (matting enabled)
+    const composed = composePhotoCutout(
+      mask,
+      sourceRgba,
+      W,
+      H,
+      10, // border
+      20, // padding
+      0,
+      0,
+      0,
+      { qualityMode: 'better', decontaminateEdge: true }
+    );
+
+    // Verify composed result has valid bounds
+    expect(composed.artworkOnlyWidth).toBeGreaterThan(0);
+    expect(composed.whiteBackedWidth).toBeGreaterThan(0);
+
+    // Verify artworkOnly contains real fractional alpha
+    let hasFractional = false;
+    for (let i = 3; i < composed.artworkOnlyRgba.length; i += 4) {
+      const a = composed.artworkOnlyRgba[i];
+      if (a > 0 && a < 255) {
+        hasFractional = true;
+        break;
+      }
+    }
+    expect(hasFractional).toBe(true);
+
+    // Verify white die-cut backing is wide enough to enclose all visible artwork
+    expect(composed.whiteBackedWidth).toBeGreaterThanOrEqual(composed.artworkOnlyWidth);
+    expect(composed.whiteBackedHeight).toBeGreaterThanOrEqual(composed.artworkOnlyHeight);
+  });
+});

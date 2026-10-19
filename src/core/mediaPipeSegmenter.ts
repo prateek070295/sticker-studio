@@ -67,6 +67,7 @@ export async function getMediaPipeDetector() {
 
 export interface SegmentPhotoResult {
   mask: Uint8Array; // Binary 1 = foreground, 0 = background (width * height)
+  confidenceMap?: Float32Array; // Continuous probability 0.0 .. 1.0 (width * height)
   fgCount: number;
   width: number;
   height: number;
@@ -79,6 +80,7 @@ export const DEFAULT_CROP_MARGIN_RATIO = 0.20; // 20% margin around bounding box
 
 export interface PersonCropResult {
   cropMask: Uint8Array;
+  cropConfidence?: Float32Array; // Continuous model probabilities 0.0 .. 1.0
   cropBounds: BoundingBox;
   fgCount: number;
   width: number;
@@ -103,6 +105,8 @@ export function filterPersonCandidate(
 /**
  * Detect candidate people in a photo using MediaPipe EfficientDet-Lite0.
  * Sorts detected boxes left-to-right for consistent user ordering (P1, P2, ...).
+ * Suppresses automatic inclusion of low-confidence candidates that strongly overlap
+ * higher-confidence primary subjects (e.g. false person detection on hair accessories).
  */
 export async function detectPeopleInPhoto(
   sourceImage: ImageData,
@@ -156,15 +160,39 @@ export async function detectPeopleInPhoto(
   // Sort left-to-right (by x-coordinate)
   personBoxes.sort((a, b) => a.box.x - b.box.x);
 
-  return personBoxes.map((p, idx) => ({
-    id: `person_${idx + 1}_${p.box.x}_${p.box.y}`,
-    label: `P${idx + 1} (${Math.round(p.score * 100)}%)`,
-    box: p.box,
-    score: p.score,
-    isManual: false,
-    included: true,
-    isUncertain: p.isUncertain,
-  }));
+  return personBoxes.map((p, idx) => {
+    // Check if this candidate strongly overlaps with any higher-confidence person candidate
+    let isSuppressedByOverlap = false;
+    if (p.score < 0.35 || p.isUncertain) {
+      const pArea = p.box.width * p.box.height;
+      for (const other of personBoxes) {
+        if (other === p) continue;
+        if (other.score >= 0.45 && other.score > p.score + 0.15) {
+          const ix0 = Math.max(p.box.x, other.box.x);
+          const ix1 = Math.min(p.box.x + p.box.width, other.box.x + other.box.width);
+          const iy0 = Math.max(p.box.y, other.box.y);
+          const iy1 = Math.min(p.box.y + p.box.height, other.box.y + other.box.height);
+          if (ix1 > ix0 && iy1 > iy0) {
+            const overlapArea = (ix1 - ix0) * (iy1 - iy0);
+            if (overlapArea / pArea >= 0.35) {
+              isSuppressedByOverlap = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    return {
+      id: `person_${idx + 1}_${p.box.x}_${p.box.y}`,
+      label: `P${idx + 1} (${Math.round(p.score * 100)}%)`,
+      box: p.box,
+      score: p.score,
+      isManual: false,
+      included: !isSuppressedByOverlap,
+      isUncertain: p.isUncertain || isSuppressedByOverlap,
+    };
+  });
 }
 
 /**
@@ -176,7 +204,7 @@ export async function segmentPersonCrop(
   sourceImage: ImageData,
   region: PersonRegion,
   marginPercent: number = DEFAULT_CROP_MARGIN_RATIO
-): Promise<{ cropMask: Uint8Array; cropBounds: BoundingBox; fgCount: number }> {
+): Promise<PersonCropResult> {
   const segmenter = await getMediaPipeSegmenter();
   const W = sourceImage.width;
   const H = sourceImage.height;
@@ -195,7 +223,7 @@ export async function segmentPersonCrop(
   const cropBounds: BoundingBox = { x: cropX, y: cropY, width: cropW, height: cropH };
 
   if (cropW <= 0 || cropH <= 0) {
-    return { cropMask: new Uint8Array(0), cropBounds, fgCount: 0 };
+    return { cropMask: new Uint8Array(0), cropBounds, fgCount: 0, width: cropW, height: cropH };
   }
 
   // Render crop canvas
@@ -219,7 +247,7 @@ export async function segmentPersonCrop(
   const segResult = segmenter.segment(cropCanvas);
   const confidenceMasks = segResult.confidenceMasks;
   if (!confidenceMasks || confidenceMasks.length === 0) {
-    return { cropMask: new Uint8Array(cropW * cropH), cropBounds, fgCount: 0 };
+    return { cropMask: new Uint8Array(cropW * cropH), cropBounds, fgCount: 0, width: cropW, height: cropH };
   }
 
   const fgConfidence = confidenceMasks[0];
@@ -228,10 +256,13 @@ export async function segmentPersonCrop(
   const rawFloats = fgConfidence.getAsFloat32Array();
 
   const rawCropMask = new Uint8Array(cropW * cropH);
+  const cropConfidence = new Float32Array(cropW * cropH);
 
   if (fgWidth === cropW && fgHeight === cropH) {
     for (let i = 0; i < cropW * cropH; i++) {
-      if (rawFloats[i] >= 0.45) rawCropMask[i] = 1;
+      const conf = rawFloats[i];
+      cropConfidence[i] = conf;
+      if (conf >= 0.45) rawCropMask[i] = 1;
     }
   } else {
     // Bilinear upsample from model resolution to crop resolution
@@ -256,8 +287,10 @@ export async function segmentPersonCrop(
         const bot = v01 * (1 - dx) + v11 * dx;
         const conf = top * (1 - dy) + bot * dy;
 
+        const idx = cy * cropW + cx;
+        cropConfidence[idx] = conf;
         if (conf >= 0.45) {
-          rawCropMask[cy * cropW + cx] = 1;
+          rawCropMask[idx] = 1;
         }
       }
     }
@@ -280,7 +313,7 @@ export async function segmentPersonCrop(
     if (cleanCropMask[i] > 0) fgCount++;
   }
 
-  return { cropMask: cleanCropMask, cropBounds, fgCount };
+  return { cropMask: cleanCropMask, cropConfidence, cropBounds, fgCount, width: cropW, height: cropH };
 }
 
 /**
@@ -388,6 +421,45 @@ export function combinePersonRegions(
 }
 
 /**
+ * Combine regional continuous confidence maps into a canonical full-image confidence map (0.0 .. 1.0).
+ */
+export function combinePersonConfidence(
+  regions: PersonRegion[],
+  W: number,
+  H: number
+): Float32Array {
+  const globalConf = new Float32Array(W * H);
+
+  for (const region of regions) {
+    if (!region.included || !region.cropConfidence || !region.cropBounds) continue;
+
+    const { x: cropX, y: cropY, width: cropW, height: cropH } = region.cropBounds;
+    const conf = region.cropConfidence;
+
+    for (let cy = 0; cy < cropH; cy++) {
+      const gy = cropY + cy;
+      if (gy < 0 || gy >= H) continue;
+
+      const gRowOff = gy * W;
+      const cRowOff = cy * cropW;
+
+      for (let cx = 0; cx < cropW; cx++) {
+        const gx = cropX + cx;
+        if (gx < 0 || gx >= W) continue;
+
+        const val = conf[cRowOff + cx];
+        const gIdx = gRowOff + gx;
+        if (val > globalConf[gIdx]) {
+          globalConf[gIdx] = val;
+        }
+      }
+    }
+  }
+
+  return globalConf;
+}
+
+/**
  * Baseline single-pass full-frame foreground segmentation.
  */
 export async function segmentPhotoForeground(
@@ -420,11 +492,14 @@ export async function segmentPhotoForeground(
   const rawFloats = fgConfidence.getAsFloat32Array();
 
   const binaryMask = new Uint8Array(W * H);
+  const confidenceMap = new Float32Array(W * H);
   let fgCount = 0;
 
   if (fgWidth === W && fgHeight === H) {
     for (let i = 0; i < W * H; i++) {
-      if (rawFloats[i] >= 0.5) {
+      const conf = rawFloats[i];
+      confidenceMap[i] = conf;
+      if (conf >= 0.5) {
         binaryMask[i] = 1;
         fgCount++;
       }
@@ -451,8 +526,10 @@ export async function segmentPhotoForeground(
         const bot = v01 * (1 - dx) + v11 * dx;
         const conf = top * (1 - dy) + bot * dy;
 
+        const idx = y * W + x;
+        confidenceMap[idx] = conf;
         if (conf >= 0.5) {
-          binaryMask[y * W + x] = 1;
+          binaryMask[idx] = 1;
           fgCount++;
         }
       }
@@ -461,6 +538,7 @@ export async function segmentPhotoForeground(
 
   return {
     mask: binaryMask,
+    confidenceMap,
     fgCount,
     width: W,
     height: H,
