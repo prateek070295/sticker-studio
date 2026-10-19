@@ -4,7 +4,13 @@
  * Generates a unified, smooth white die-cut backing using Euclidean Distance Transform.
  */
 
-import { CartoonTemplateManifest, ExtractedHeadResult, HeadTransform } from '../cartoon/types';
+import {
+  CartoonTemplateManifest,
+  ExtractedHeadResult,
+  HeadTransform,
+  GlobalHeadAlignment,
+  IndividualHeadAlignment,
+} from '../cartoon/types';
 import { computeEuclideanDistanceTransform } from './edt';
 import { applyContourSmoothing } from './composer';
 import { extractPhotographicHead } from './cartoonHeadExtractor';
@@ -16,10 +22,54 @@ if (typeof window !== 'undefined') {
     renderCartoonArtwork,
     generateCartoonStickerDieCut,
     computeInitialHeadPlacement,
+    computeEffectiveHeadTransform,
+    getPhotographicChinCropAnchor,
     HI_WAVING_TEMPLATE,
     CARTOON_REACTIONS_PACK,
     ALL_CARTOON_TEMPLATES,
   };
+}
+
+/**
+ * Resolves the photographic chin anchor in head crop coordinates (pixels relative to crop top-left).
+ */
+export function getPhotographicChinCropAnchor(
+  head: ExtractedHeadResult,
+  customChin?: { x: number; y: number } | null
+): { x: number; y: number } {
+  if (customChin) {
+    return { x: customChin.x, y: customChin.y };
+  }
+  if (head.calibratedChin) {
+    return { x: head.calibratedChin.x, y: head.calibratedChin.y };
+  }
+  if (head.landmarks?.calibratedChin) {
+    return {
+      x: head.landmarks.calibratedChin.x - head.cropBounds.x,
+      y: head.landmarks.calibratedChin.y - head.cropBounds.y,
+    };
+  }
+  if (head.landmarks) {
+    const lms: any = head.landmarks;
+    const chinLandmark = lms.chin || lms.estimatedChin;
+    const chinY =
+      chinLandmark?.y ??
+      (lms.mouthCenter
+        ? lms.mouthCenter.y + (lms.mouthCenter.y - (lms.noseTip?.y ?? lms.mouthCenter.y - 30)) * 0.7
+        : lms.boundingBox
+        ? lms.boundingBox.originY + lms.boundingBox.height
+        : head.height * 0.85 + head.cropBounds.y);
+    const midX =
+      lms.eyeMidpoint?.x ??
+      (lms.leftEye && lms.rightEye
+        ? (lms.leftEye.x + lms.rightEye.x) * 0.5
+        : lms.noseTip?.x ?? head.width * 0.5 + head.cropBounds.x);
+    const chinX = chinLandmark?.x ?? midX;
+    const chinCropX = chinX - head.cropBounds.x;
+    const chinCropY = chinY - head.cropBounds.y;
+    return { x: chinCropX, y: chinCropY };
+  }
+  return { x: head.width * 0.5, y: head.height * 0.85 };
 }
 
 /**
@@ -28,7 +78,8 @@ if (typeof window !== 'undefined') {
  */
 export function computeInitialHeadPlacement(
   template: CartoonTemplateManifest,
-  head: ExtractedHeadResult
+  head: ExtractedHeadResult,
+  customChin?: { x: number; y: number } | null
 ): HeadTransform {
   const { canvas, headSlot } = template;
   const canvasW = canvas.width;
@@ -52,30 +103,23 @@ export function computeInitialHeadPlacement(
   let rotationDegrees = headSlot.defaultRotation;
   if (head.landmarks) {
     // Delta angle to align eye line with template target
-    const angleDelta = headSlot.targetEyeAngleDegrees - head.landmarks.eyeAngleDegrees;
+    const eyeAngle = head.landmarks.eyeAngleDegrees ?? 0;
+    const angleDelta = (headSlot.targetEyeAngleDegrees ?? 0) - eyeAngle;
     rotationDegrees += angleDelta;
   }
 
-  // 3. Center Position
+  // 3. Center Position (Chin-anchored)
   let centerX = slotCenterX;
   let centerY = slotCenterY;
 
-  if (head.landmarks) {
+  if (head.landmarks || customChin || head.calibratedChin) {
     // Chin anchoring on collar
     const targetChinX = slotCenterX;
     const targetChinY = (headSlot.targetChinY ?? 0.50) * canvasH;
 
-    const chinY = head.landmarks.estimatedChin?.y ?? (
-      head.landmarks.mouthCenter
-        ? head.landmarks.mouthCenter.y + (head.landmarks.mouthCenter.y - (head.landmarks.noseTip?.y ?? head.landmarks.mouthCenter.y - 30)) * 0.7
-        : head.landmarks.boundingBox.originY + head.landmarks.boundingBox.height
-    );
-
-    const chinCropX = (head.landmarks.estimatedChin?.x ?? head.landmarks.eyeMidpoint.x) - head.cropBounds.x;
-    const chinCropY = chinY - head.cropBounds.y;
-
-    const dx = chinCropX - head.width * 0.5;
-    const dy = chinCropY - head.height * 0.5;
+    const chinCrop = getPhotographicChinCropAnchor(head, customChin);
+    const dx = chinCrop.x - head.width * 0.5;
+    const dy = chinCrop.y - head.height * 0.5;
 
     const rad = (rotationDegrees * Math.PI) / 180;
     const cos = Math.cos(rad);
@@ -103,6 +147,88 @@ export function computeInitialHeadPlacement(
       rotationDegrees: parseFloat(rotationDegrees.toFixed(2)),
       hairBehindBody: hairBehind,
     },
+  };
+}
+
+/**
+ * Computes non-destructive effective transform by combining:
+ * 1. Template baseline auto-placement (immutable)
+ * 2. Global pack-wide alignment correction
+ * 3. Individual template alignment override
+ *
+ * All transformations are anchored strictly about the photographic chin / collar anchor:
+ * - Scale expands/contracts about the chin anchor without detaching the collar.
+ * - Rotation pivots about the chin anchor.
+ * - Translation shifts relative to the template's face height.
+ * - Zero cumulative drift on repeated adjustments.
+ */
+export function computeEffectiveHeadTransform(
+  template: CartoonTemplateManifest,
+  head: ExtractedHeadResult,
+  basePlacement: HeadTransform,
+  globalAlignment: GlobalHeadAlignment = { scaleMultiplier: 1.0, rotationDelta: 0, offsetX: 0, offsetY: 0 },
+  individualAlignment?: IndividualHeadAlignment | null,
+  calibratedChin?: { x: number; y: number } | null
+): HeadTransform {
+  const { canvas, headSlot } = template;
+  const canvasW = canvas.width;
+  const canvasH = canvas.height;
+
+  const auto = basePlacement.autoPlacement || basePlacement;
+  const baseScale = auto.scale;
+  const baseRotation = auto.rotationDegrees;
+
+  // 1. Combine Scale Multiplicatively
+  const gScale = globalAlignment.scaleMultiplier ?? 1.0;
+  const iScale = individualAlignment?.scaleMultiplier ?? 1.0;
+  const effectiveScale = parseFloat((baseScale * gScale * iScale).toFixed(4));
+
+  // 2. Combine Rotation Additively
+  const gRot = globalAlignment.rotationDelta ?? 0;
+  const iRot = individualAlignment?.rotationDelta ?? 0;
+  const effectiveRotation = parseFloat((baseRotation + gRot + iRot).toFixed(2));
+
+  // 3. Chin collar target on template canvas
+  const slotCenterX = headSlot.centerX * canvasW;
+  const targetChinX = slotCenterX;
+  const targetChinY = (headSlot.targetChinY ?? 0.50) * canvasH;
+
+  // Stable per-template face height for normalized translation
+  const faceH = (headSlot.targetFaceH ?? 0.254) * canvasH;
+
+  // 4. Combine Translation Offsets relative to template face height
+  const totalOffsetX = (globalAlignment.offsetX ?? 0) + (individualAlignment?.offsetX ?? 0);
+  const totalOffsetY = (globalAlignment.offsetY ?? 0) + (individualAlignment?.offsetY ?? 0);
+
+  const effectiveTargetChinX = targetChinX + totalOffsetX * faceH;
+  const effectiveTargetChinY = targetChinY + totalOffsetY * faceH;
+
+  // 5. Chin-anchored Affine Transform
+  const chinCrop = getPhotographicChinCropAnchor(head, calibratedChin);
+  const dx = chinCrop.x - head.width * 0.5;
+  const dy = chinCrop.y - head.height * 0.5;
+
+  const rad = (effectiveRotation * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+
+  const rotChinX = (dx * cos - dy * sin) * effectiveScale;
+  const rotChinY = (dx * sin + dy * cos) * effectiveScale;
+
+  const effectiveCenterX = Math.round(effectiveTargetChinX - rotChinX);
+  const effectiveCenterY = Math.round(effectiveTargetChinY - rotChinY);
+
+  const hairBehind = basePlacement.hairBehindBody !== undefined
+    ? basePlacement.hairBehindBody
+    : (headSlot.hairLayering === 'behind');
+
+  return {
+    centerX: effectiveCenterX,
+    centerY: effectiveCenterY,
+    scale: effectiveScale,
+    rotationDegrees: effectiveRotation,
+    hairBehindBody: hairBehind,
+    autoPlacement: auto,
   };
 }
 

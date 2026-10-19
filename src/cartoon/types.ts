@@ -74,6 +74,30 @@ export interface FaceLandmarks {
   eyeAngleDegrees: number;
   /** Estimated anatomical chin landmark derived by projecting vector from noseTip to mouthCenter */
   estimatedChin: { x: number; y: number };
+  /** Optional user-calibrated chin point in unscaled photo coordinates */
+  calibratedChin?: { x: number; y: number } | null;
+}
+
+export interface GlobalHeadAlignment {
+  /** Global scale multiplier applied proportionally to all 12 stickers (default: 1.0, range: 0.75 - 1.35) */
+  scaleMultiplier: number;
+  /** Global rotation delta in degrees applied to all 12 stickers (default: 0, range: -15 to +15) */
+  rotationDelta: number;
+  /** Global horizontal offset normalized relative to template face height (default: 0) */
+  offsetX: number;
+  /** Global vertical offset normalized relative to template face height (default: 0) */
+  offsetY: number;
+}
+
+export interface IndividualHeadAlignment {
+  /** Template-specific relative scale multiplier (default: 1.0) */
+  scaleMultiplier: number;
+  /** Template-specific relative rotation delta in degrees (default: 0) */
+  rotationDelta: number;
+  /** Template-specific horizontal offset normalized relative to template face height (default: 0) */
+  offsetX: number;
+  /** Template-specific vertical offset normalized relative to template face height (default: 0) */
+  offsetY: number;
 }
 
 export interface HeadTransform {
@@ -119,10 +143,12 @@ export interface ExtractedHeadResult {
   rearHairCanvas?: HTMLCanvasElement;
   /** Detected face landmarks if available */
   landmarks: FaceLandmarks | null;
+  /** Optional user-calibrated chin point in crop coordinates */
+  calibratedChin?: { x: number; y: number } | null;
 }
 
 export interface CartoonProjectData {
-  version: 3 | 4;
+  version: 3 | 4 | 5;
   appMode: 'cartoon';
   templateId: string;
   selfieDataUrl: string;
@@ -153,5 +179,11 @@ export interface CartoonProjectData {
   templateBorderThicknesses?: Record<string, number>;
   /** V1.5 set of selected template IDs for pack export */
   selectedTemplateIds?: string[];
+  /** V1.6 global pack-wide head alignment */
+  globalHeadAlignment?: GlobalHeadAlignment;
+  /** V1.6 per-template relative alignment overrides */
+  individualHeadAlignments?: Record<string, IndividualHeadAlignment>;
+  /** V1.6 user-calibrated chin point in crop coordinates */
+  calibratedChin?: { x: number; y: number } | null;
   dateModified: string;
 }
