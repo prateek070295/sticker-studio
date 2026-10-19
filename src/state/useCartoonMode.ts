@@ -113,6 +113,7 @@ export interface UseCartoonModeReturn {
   selectedTemplateIds: string[];
   packPreviews: Record<string, PackStickerPreview>;
   templateTransforms: Record<string, HeadTransform>;
+  templateBorderThicknesses: Record<string, number>;
   isExportingZip: boolean;
 
   // Mask & Tool Controls
@@ -143,6 +144,8 @@ export interface UseCartoonModeReturn {
   }) => void;
   resetPlacement: () => void;
   setBorderThickness: (val: number) => void;
+  setGlobalBorderThickness: (val: number) => void;
+  setTemplateBorderThickness: (templateId: string, val: number | null) => void;
   setSmoothOutlineLevel: (val: number) => void;
   setPreviewBg: (bg: 'checker' | 'dark' | 'white' | 'print') => void;
   exportArtworkPng: () => void;
@@ -228,15 +231,17 @@ export function useCartoonMode(): UseCartoonModeReturn {
     async (
       head: ExtractedHeadResult,
       transforms: Record<string, HeadTransform>,
-      bThickness: number,
+      customBorders: Record<string, number>,
+      globalBorder: number,
       sLevel: number
     ) => {
       const newPreviews: Record<string, PackStickerPreview> = {};
       for (let i = 0; i < CARTOON_REACTIONS_PACK.length; i++) {
         const tpl = CARTOON_REACTIONS_PACK[i];
         const tf = transforms[tpl.id] || computeInitialHeadPlacement(tpl, head);
+        const bThick = customBorders[tpl.id] ?? globalBorder;
         const art = await renderCartoonArtwork(tpl, head, tf);
-        const dieCut = generateCartoonStickerDieCut(art, bThickness, sLevel);
+        const dieCut = generateCartoonStickerDieCut(art, bThick, sLevel);
         newPreviews[tpl.id] = {
           artworkCanvas: art,
           stickerCanvas: dieCut.stickerCanvas,
@@ -283,6 +288,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
         const previews = await renderAllPackPreviews(
           head,
           initialTransforms,
+          {},
           borderThickness,
           smoothOutlineLevel
         );
@@ -358,17 +364,18 @@ export function useCartoonMode(): UseCartoonModeReturn {
       }
 
       const prev = packPreviews[templateId];
+      const customBorder = templateBorderThicknesses[templateId] ?? borderThickness;
       if (prev) {
         setArtworkCanvas(prev.artworkCanvas);
         setStickerCanvas(prev.stickerCanvas);
         setTightCrop(prev.tightCrop);
       } else if (extractedHead && tf) {
-        recomposite(tpl, extractedHead, tf, borderThickness, smoothOutlineLevel);
+        recomposite(tpl, extractedHead, tf, customBorder, smoothOutlineLevel);
       }
 
       setViewMode('detail');
     },
-    [templateTransforms, extractedHead, packPreviews, borderThickness, smoothOutlineLevel, recomposite]
+    [templateTransforms, extractedHead, packPreviews, templateBorderThicknesses, borderThickness, smoothOutlineLevel, recomposite]
   );
 
   const toggleTemplateSelection = useCallback((id: string) => {
@@ -408,11 +415,12 @@ export function useCartoonMode(): UseCartoonModeReturn {
           update.hairBehindBody !== undefined ? update.hairBehindBody : headTransform.hairBehindBody,
       };
 
+      const customBorder = templateBorderThicknesses[activeTemplate.id] ?? borderThickness;
       setHeadTransform(newTf);
       setTemplateTransforms((prev) => ({ ...prev, [activeTemplate.id]: newTf }));
-      recomposite(activeTemplate, extractedHead, newTf, borderThickness, smoothOutlineLevel);
+      recomposite(activeTemplate, extractedHead, newTf, customBorder, smoothOutlineLevel);
     },
-    [headTransform, extractedHead, activeTemplate, borderThickness, smoothOutlineLevel, recomposite]
+    [headTransform, extractedHead, activeTemplate, templateBorderThicknesses, borderThickness, smoothOutlineLevel, recomposite]
   );
 
   const resetPlacement = useCallback(() => {
@@ -425,19 +433,28 @@ export function useCartoonMode(): UseCartoonModeReturn {
       hairBehindBody: headTransform.autoPlacement.hairBehindBody,
       autoPlacement: headTransform.autoPlacement,
     };
+    const customBorder = templateBorderThicknesses[activeTemplate.id] ?? borderThickness;
     setHeadTransform(resetTf);
     setTemplateTransforms((prev) => ({ ...prev, [activeTemplate.id]: resetTf }));
-    recomposite(activeTemplate, extractedHead, resetTf, borderThickness, smoothOutlineLevel);
-  }, [headTransform, extractedHead, activeTemplate, borderThickness, smoothOutlineLevel, recomposite]);
+    recomposite(activeTemplate, extractedHead, resetTf, customBorder, smoothOutlineLevel);
+  }, [headTransform, extractedHead, activeTemplate, templateBorderThicknesses, borderThickness, smoothOutlineLevel, recomposite]);
 
-  const setBorderThickness = useCallback(
-    (val: number) => {
-      setBorderThicknessState(val);
-      setTemplateBorderThicknesses((prev) => ({ ...prev, [activeTemplate.id]: val }));
-      if (artworkCanvas) {
+  // Set individual border thickness for a specific template (or null to revert to global)
+  const setTemplateBorderThickness = useCallback(
+    (templateId: string, val: number | null) => {
+      const updatedBorders = { ...templateBorderThicknesses };
+      if (val === null) {
+        delete updatedBorders[templateId];
+      } else {
+        updatedBorders[templateId] = val;
+      }
+      setTemplateBorderThicknesses(updatedBorders);
+
+      const effectiveVal = val ?? borderThickness;
+      if (templateId === activeTemplate.id && artworkCanvas) {
         const { stickerCanvas: stCanvas, tightCrop: crop } = generateCartoonStickerDieCut(
           artworkCanvas,
-          val,
+          effectiveVal,
           smoothOutlineLevel
         );
         setStickerCanvas(stCanvas);
@@ -445,15 +462,84 @@ export function useCartoonMode(): UseCartoonModeReturn {
 
         setPackPreviews((prev) => ({
           ...prev,
-          [activeTemplate.id]: {
+          [templateId]: {
             artworkCanvas,
+            stickerCanvas: stCanvas,
+            tightCrop: crop,
+          },
+        }));
+      } else if (packPreviews[templateId]) {
+        const prev = packPreviews[templateId];
+        const { stickerCanvas: stCanvas, tightCrop: crop } = generateCartoonStickerDieCut(
+          prev.artworkCanvas,
+          effectiveVal,
+          smoothOutlineLevel
+        );
+        setPackPreviews((prevMap) => ({
+          ...prevMap,
+          [templateId]: {
+            artworkCanvas: prev.artworkCanvas,
             stickerCanvas: stCanvas,
             tightCrop: crop,
           },
         }));
       }
     },
-    [artworkCanvas, activeTemplate.id, smoothOutlineLevel]
+    [templateBorderThicknesses, borderThickness, activeTemplate.id, artworkCanvas, smoothOutlineLevel, packPreviews]
+  );
+
+  // Set global border thickness across the whole pack (preserves individual overrides)
+  const setGlobalBorderThickness = useCallback(
+    (val: number) => {
+      setBorderThicknessState(val);
+
+      setPackPreviews((prevMap) => {
+        const nextMap: Record<string, PackStickerPreview> = { ...prevMap };
+        for (const tpl of CARTOON_REACTIONS_PACK) {
+          if (templateBorderThicknesses[tpl.id] !== undefined) {
+            // Keep individual override intact!
+            continue;
+          }
+          const prev = prevMap[tpl.id];
+          if (prev) {
+            const { stickerCanvas: stCanvas, tightCrop: crop } = generateCartoonStickerDieCut(
+              prev.artworkCanvas,
+              val,
+              smoothOutlineLevel
+            );
+            nextMap[tpl.id] = {
+              artworkCanvas: prev.artworkCanvas,
+              stickerCanvas: stCanvas,
+              tightCrop: crop,
+            };
+          }
+        }
+        return nextMap;
+      });
+
+      if (templateBorderThicknesses[activeTemplate.id] === undefined && artworkCanvas) {
+        const { stickerCanvas: stCanvas, tightCrop: crop } = generateCartoonStickerDieCut(
+          artworkCanvas,
+          val,
+          smoothOutlineLevel
+        );
+        setStickerCanvas(stCanvas);
+        setTightCrop(crop);
+      }
+    },
+    [templateBorderThicknesses, activeTemplate.id, artworkCanvas, smoothOutlineLevel]
+  );
+
+  // Unified setter: detail mode sets individual template border, gallery mode sets global pack border
+  const setBorderThickness = useCallback(
+    (val: number) => {
+      if (viewMode === 'detail') {
+        setTemplateBorderThickness(activeTemplate.id, val);
+      } else {
+        setGlobalBorderThickness(val);
+      }
+    },
+    [viewMode, activeTemplate.id, setTemplateBorderThickness, setGlobalBorderThickness]
   );
 
   const exportArtworkPng = useCallback(() => {
@@ -635,11 +721,18 @@ export function useCartoonMode(): UseCartoonModeReturn {
 
       // Recomposite active template immediately
       if (headTransform) {
-        recomposite(activeTemplate, extractedHead, headTransform, borderThickness, smoothOutlineLevel);
+        const curBorder = templateBorderThicknesses[activeTemplate.id] ?? borderThickness;
+        recomposite(activeTemplate, extractedHead, headTransform, curBorder, smoothOutlineLevel);
       }
 
       // Re-render all 12 pack previews in background so gallery remains accurate
-      renderAllPackPreviews(extractedHead, templateTransforms, borderThickness, smoothOutlineLevel);
+      renderAllPackPreviews(
+        extractedHead,
+        templateTransforms,
+        templateBorderThicknesses,
+        borderThickness,
+        smoothOutlineLevel
+      );
     },
     [
       extractedHead,
@@ -648,6 +741,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
       headTransform,
       activeTemplate,
       borderThickness,
+      templateBorderThicknesses,
       smoothOutlineLevel,
       templateTransforms,
       recomposite,
@@ -705,15 +799,23 @@ export function useCartoonMode(): UseCartoonModeReturn {
     setRedoStack((prev) => [...prev, patch]);
 
     if (headTransform) {
-      recomposite(activeTemplate, extractedHead, headTransform, borderThickness, smoothOutlineLevel);
+      const curBorder = templateBorderThicknesses[activeTemplate.id] ?? borderThickness;
+      recomposite(activeTemplate, extractedHead, headTransform, curBorder, smoothOutlineLevel);
     }
-    renderAllPackPreviews(extractedHead, templateTransforms, borderThickness, smoothOutlineLevel);
+    renderAllPackPreviews(
+      extractedHead,
+      templateTransforms,
+      templateBorderThicknesses,
+      borderThickness,
+      smoothOutlineLevel
+    );
   }, [
     extractedHead,
     undoStack,
     headTransform,
     activeTemplate,
     borderThickness,
+    templateBorderThicknesses,
     smoothOutlineLevel,
     templateTransforms,
     recomposite,
@@ -770,15 +872,23 @@ export function useCartoonMode(): UseCartoonModeReturn {
     setUndoStack((prev) => [...prev, patch]);
 
     if (headTransform) {
-      recomposite(activeTemplate, extractedHead, headTransform, borderThickness, smoothOutlineLevel);
+      const curBorder = templateBorderThicknesses[activeTemplate.id] ?? borderThickness;
+      recomposite(activeTemplate, extractedHead, headTransform, curBorder, smoothOutlineLevel);
     }
-    renderAllPackPreviews(extractedHead, templateTransforms, borderThickness, smoothOutlineLevel);
+    renderAllPackPreviews(
+      extractedHead,
+      templateTransforms,
+      templateBorderThicknesses,
+      borderThickness,
+      smoothOutlineLevel
+    );
   }, [
     extractedHead,
     redoStack,
     headTransform,
     activeTemplate,
     borderThickness,
+    templateBorderThicknesses,
     smoothOutlineLevel,
     templateTransforms,
     recomposite,
@@ -928,9 +1038,8 @@ export function useCartoonMode(): UseCartoonModeReturn {
           const curTransform = restoredTransforms[tpl.id] || proj.headTransform;
           setHeadTransform(curTransform);
 
-          if (proj.templateBorderThicknesses) {
-            setTemplateBorderThicknesses(proj.templateBorderThicknesses);
-          }
+          const restoredBorders = proj.templateBorderThicknesses || {};
+          setTemplateBorderThicknesses(restoredBorders);
           if (proj.selectedTemplateIds) {
             setSelectedTemplateIds(proj.selectedTemplateIds);
           } else {
@@ -940,8 +1049,9 @@ export function useCartoonMode(): UseCartoonModeReturn {
           const previews = await renderAllPackPreviews(
             restoredHead,
             restoredTransforms,
-            proj.borderThickness,
-            proj.smoothOutlineLevel
+            restoredBorders,
+            proj.borderThickness ?? 24,
+            proj.smoothOutlineLevel ?? 2
           );
 
           const activePrev = previews[tpl.id];
@@ -973,6 +1083,17 @@ export function useCartoonMode(): UseCartoonModeReturn {
     [recomposite, renderAllPackPreviews]
   );
 
+  if (typeof window !== 'undefined') {
+    (window as any).__lastCartoonState = {
+      extractedHead,
+      packPreviews,
+      templateTransforms,
+      templateBorderThicknesses,
+      borderThickness,
+      selectedTemplateIds,
+    };
+  }
+
   return {
     selfieDataUrl,
     selfieFileName,
@@ -994,6 +1115,7 @@ export function useCartoonMode(): UseCartoonModeReturn {
     selectedTemplateIds,
     packPreviews,
     templateTransforms,
+    templateBorderThicknesses,
     isExportingZip,
 
     toolMode,
@@ -1016,6 +1138,8 @@ export function useCartoonMode(): UseCartoonModeReturn {
     updateHeadTransform,
     resetPlacement,
     setBorderThickness,
+    setGlobalBorderThickness,
+    setTemplateBorderThickness,
     setSmoothOutlineLevel,
     setPreviewBg,
     exportArtworkPng,

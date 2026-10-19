@@ -129,7 +129,10 @@ export const CartoonModeView: React.FC<CartoonModeViewProps> = ({ onBackToMain }
     loadSelfieUrl,
     updateHeadTransform,
     resetPlacement,
+    templateBorderThicknesses,
     setBorderThickness,
+    setGlobalBorderThickness,
+    setTemplateBorderThickness,
     setSmoothOutlineLevel,
     setPreviewBg,
     exportArtworkPng,
@@ -428,7 +431,7 @@ export const CartoonModeView: React.FC<CartoonModeViewProps> = ({ onBackToMain }
               {/* Upload Card */}
               <div
                 onClick={() => fileInputRef.current?.click()}
-                className="w-full border-2 border-dashed border-slate-700/80 hover:border-rose-500/60 rounded-3xl p-8 flex flex-col items-center justify-center cursor-pointer bg-slate-900/40 hover:bg-slate-900/80 transition group mb-6"
+                className="w-full border-2 border-dashed border-slate-700/80 hover:border-rose-500/60 rounded-3xl p-8 flex flex-col items-center justify-center cursor-pointer bg-slate-900/40 hover:bg-slate-900/80 transition group"
               >
                 <div className="w-12 h-12 rounded-2xl bg-slate-800 group-hover:bg-rose-500/20 flex items-center justify-center mb-3 text-slate-400 group-hover:text-rose-400 transition">
                   <Upload className="w-6 h-6" />
@@ -437,33 +440,6 @@ export const CartoonModeView: React.FC<CartoonModeViewProps> = ({ onBackToMain }
                   Click to browse photo or drag & drop here
                 </span>
                 <span className="text-xs text-slate-500">Supports JPG, PNG, WebP up to 30MP</span>
-              </div>
-
-              {/* Sample Shortcuts */}
-              <div className="flex flex-col items-center space-y-3 w-full">
-                <div className="flex items-center space-x-2 text-xs text-slate-500">
-                  <span>Or try with test portraits:</span>
-                </div>
-                <div className="flex flex-wrap items-center justify-center gap-2">
-                  <button
-                    onClick={() => loadSelfieUrl('/test-fixtures/portrait_a.jpg', 'alex_portrait.jpg')}
-                    className="px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700/60 text-slate-300 text-xs transition"
-                  >
-                    Portrait A (Short Hair)
-                  </button>
-                  <button
-                    onClick={() => loadSelfieUrl('/test-fixtures/portrait_b.jpg', 'glasses_portrait.jpg')}
-                    className="px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700/60 text-slate-300 text-xs transition"
-                  >
-                    Portrait B (Glasses)
-                  </button>
-                  <button
-                    onClick={() => loadSelfieUrl('/test-fixtures/portrait_c.jpg', 'long_hair_portrait.jpg')}
-                    className="px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700/60 text-slate-300 text-xs transition"
-                  >
-                    Portrait C (Long Hair)
-                  </button>
-                </div>
               </div>
             </div>
           </div>
@@ -499,13 +475,13 @@ export const CartoonModeView: React.FC<CartoonModeViewProps> = ({ onBackToMain }
               {/* Die-Cut Thickness & Background Selector */}
               <div className="flex items-center space-x-6">
                 <div className="flex items-center space-x-2">
-                  <span className="text-xs text-slate-400 font-medium">Border:</span>
+                  <span className="text-xs text-slate-400 font-medium">Pack Border:</span>
                   <input
                     type="range"
                     min="0"
                     max="48"
                     value={borderThickness}
-                    onChange={(e) => setBorderThickness(Number(e.target.value))}
+                    onChange={(e) => setGlobalBorderThickness(Number(e.target.value))}
                     className="w-24 accent-rose-500 h-1.5 bg-slate-700 rounded-lg cursor-pointer"
                   />
                   <span className="text-xs font-mono text-slate-300 w-8">{borderThickness}px</span>
@@ -804,20 +780,36 @@ export const CartoonModeView: React.FC<CartoonModeViewProps> = ({ onBackToMain }
 
                 {/* 3. Die-Cut Border Settings */}
                 <div className="space-y-3.5 border-t border-slate-800/80 pt-4">
-                  <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                    Die-Cut Border
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                      Die-Cut Border
+                    </div>
+                    {templateBorderThicknesses[activeTemplate.id] !== undefined && (
+                      <button
+                        onClick={() => setTemplateBorderThickness(activeTemplate.id, null)}
+                        className="text-[11px] text-rose-400 hover:text-rose-300 font-medium transition"
+                        title="Revert to global pack border"
+                      >
+                        Reset to Pack Default ({borderThickness}px)
+                      </button>
+                    )}
                   </div>
                   <div className="space-y-2">
                     <div className="flex justify-between text-xs text-slate-400">
-                      <span>Border Width</span>
-                      <span className="font-mono text-slate-200">{borderThickness}px</span>
+                      <span>Sticker Border Width</span>
+                      <span className="font-mono text-slate-200">
+                        {(templateBorderThicknesses[activeTemplate.id] ?? borderThickness)}px
+                        <span className="text-[11px] text-slate-400 font-sans ml-1">
+                          {templateBorderThicknesses[activeTemplate.id] !== undefined ? '(Custom)' : '(Pack Default)'}
+                        </span>
+                      </span>
                     </div>
                     <input
                       type="range"
                       min="0"
                       max="48"
-                      value={borderThickness}
-                      onChange={(e) => setBorderThickness(Number(e.target.value))}
+                      value={templateBorderThicknesses[activeTemplate.id] ?? borderThickness}
+                      onChange={(e) => setTemplateBorderThickness(activeTemplate.id, Number(e.target.value))}
                       className="w-full accent-rose-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
                     />
                   </div>
