@@ -122,7 +122,7 @@ export interface ExtractedHeadResult {
 }
 
 export interface CartoonProjectData {
-  version: 3;
+  version: 3 | 4;
   appMode: 'cartoon';
   templateId: string;
   selfieDataUrl: string;
@@ -147,5 +147,11 @@ export interface CartoonProjectData {
   rawCropMaskBase64?: string;
   /** Saved face landmarks to reproduce exact front/rear hair partition without rerunning MediaPipe */
   landmarks?: FaceLandmarks | null;
+  /** V1.5 multi-template per-template transform overrides */
+  templateTransforms?: Record<string, HeadTransform>;
+  /** V1.5 per-template border overrides */
+  templateBorderThicknesses?: Record<string, number>;
+  /** V1.5 set of selected template IDs for pack export */
+  selectedTemplateIds?: string[];
   dateModified: string;
 }

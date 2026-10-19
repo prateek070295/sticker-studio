@@ -8,7 +8,7 @@ import { CartoonTemplateManifest, ExtractedHeadResult, HeadTransform } from '../
 import { computeEuclideanDistanceTransform } from './edt';
 import { applyContourSmoothing } from './composer';
 import { extractPhotographicHead } from './cartoonHeadExtractor';
-import { HI_WAVING_TEMPLATE } from '../cartoon/templates/hiWaving';
+import { HI_WAVING_TEMPLATE, CARTOON_REACTIONS_PACK, ALL_CARTOON_TEMPLATES } from '../cartoon/templates';
 
 if (typeof window !== 'undefined') {
   (window as any).cartoonProductionPipeline = {
@@ -17,6 +17,8 @@ if (typeof window !== 'undefined') {
     generateCartoonStickerDieCut,
     computeInitialHeadPlacement,
     HI_WAVING_TEMPLATE,
+    CARTOON_REACTIONS_PACK,
+    ALL_CARTOON_TEMPLATES,
   };
 }
 
@@ -123,14 +125,27 @@ export function createCompatibleCanvas(width: number, height: number): HTMLCanva
   } as any;
 }
 
+const svgRasterCache = new Map<string, HTMLCanvasElement>();
+
 /**
- * High-performance SVG to Canvas rasterizer.
+ * High-performance SVG to Canvas rasterizer with memoization cache.
  */
 export function rasterizeSvgToCanvas(
   svgMarkup: string,
   width: number,
   height: number
 ): Promise<HTMLCanvasElement> {
+  const cacheKey = `${width}x${height}:${svgMarkup}`;
+  const cached = svgRasterCache.get(cacheKey);
+  if (cached) {
+    const copy = document.createElement('canvas');
+    copy.width = width;
+    copy.height = height;
+    const ctx = copy.getContext('2d');
+    if (ctx) ctx.drawImage(cached, 0, 0);
+    return Promise.resolve(copy);
+  }
+
   return new Promise((resolve, reject) => {
     const canvas = document.createElement('canvas');
     canvas.width = width;
@@ -145,7 +160,13 @@ export function rasterizeSvgToCanvas(
     img.onload = () => {
       ctx.drawImage(img, 0, 0, width, height);
       URL.revokeObjectURL(url);
-      resolve(canvas);
+      svgRasterCache.set(cacheKey, canvas);
+      const copy = document.createElement('canvas');
+      copy.width = width;
+      copy.height = height;
+      const copyCtx = copy.getContext('2d');
+      if (copyCtx) copyCtx.drawImage(canvas, 0, 0);
+      resolve(copy);
     };
 
     img.onerror = (err) => {
