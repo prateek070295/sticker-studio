@@ -13,34 +13,17 @@ import {
   AlertCircle,
   FileCode,
   Layers,
-  Smile
+  Smile,
+  Eraser,
+  Paintbrush,
+  Undo2,
+  Redo2,
 } from 'lucide-react';
 import { useCartoonMode } from '../../state/useCartoonMode';
 
 interface CartoonModeViewProps {
   onBackToMain?: () => void;
 }
-
-const SAMPLE_PORTRAITS = [
-  {
-    id: 'man_short_hair',
-    name: 'Short Hair Adult',
-    desc: 'Adult male, short styled hair & beard',
-    path: '/actual_portraits/man_glasses_portrait.jpg'
-  },
-  {
-    id: 'glasses_portrait',
-    name: 'Glasses-Wearing Person',
-    desc: 'Verified spectacles frames & clear lenses',
-    path: '/actual_portraits/alex_pretti_glasses.jpg'
-  },
-  {
-    id: 'leather_jacket',
-    name: 'Long-Haired Portrait',
-    desc: 'Tilted pose, shoulder-draped dark hair',
-    path: '/actual_portraits/leather_jacket_portrait.jpg'
-  }
-];
 
 export const CartoonModeView: React.FC<CartoonModeViewProps> = ({ onBackToMain }) => {
   const {
@@ -59,6 +42,16 @@ export const CartoonModeView: React.FC<CartoonModeViewProps> = ({ onBackToMain }
     tightCrop,
     error,
 
+    toolMode,
+    brushSize,
+    canUndo,
+    canRedo,
+    setToolMode,
+    setBrushSize,
+    undo,
+    redo,
+    applyBrushStrokeToHead,
+
     loadSelfieFile,
     loadSelfieUrl,
     updateHeadTransform,
@@ -69,21 +62,22 @@ export const CartoonModeView: React.FC<CartoonModeViewProps> = ({ onBackToMain }
     exportArtworkPng,
     exportStickerPng,
     saveProjectJson,
-    loadProjectJson
+    loadProjectJson,
   } = useCartoonMode();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const projectInputRef = useRef<HTMLInputElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Drag interaction on canvas to reposition head
-  const [isDragging, setIsDragging] = useState<boolean>(false);
+  // Interaction state on preview canvas (move vs brush)
+  const [isInteracting, setIsInteracting] = useState<boolean>(false);
   const dragStartRef = useRef<{ mouseX: number; mouseY: number; initCenterX: number; initCenterY: number }>({
     mouseX: 0,
     mouseY: 0,
     initCenterX: 0,
-    initCenterY: 0
+    initCenterY: 0,
   });
+  const strokePointsRef = useRef<Array<{ x: number; y: number; pressure: number }>>([]);
 
   // Render sticker to the interactive display canvas
   useEffect(() => {
@@ -99,40 +93,79 @@ export const CartoonModeView: React.FC<CartoonModeViewProps> = ({ onBackToMain }
     ctx.drawImage(stickerCanvas, 0, 0);
   }, [stickerCanvas]);
 
-  // Handle direct canvas dragging
-  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!headTransform || !previewCanvasRef.current) return;
+  const getHeadCropCoords = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!headTransform || !extractedHead || !previewCanvasRef.current) return null;
     const rect = previewCanvasRef.current.getBoundingClientRect();
     const scaleFactor = 1024 / rect.width;
+    const canvasX = (e.clientX - rect.left) * scaleFactor;
+    const canvasY = (e.clientY - rect.top) * scaleFactor;
 
-    setIsDragging(true);
-    dragStartRef.current = {
-      mouseX: e.clientX,
-      mouseY: e.clientY,
-      initCenterX: headTransform.centerX,
-      initCenterY: headTransform.centerY
-    };
+    const dx = canvasX - headTransform.centerX;
+    const dy = canvasY - headTransform.centerY;
+    const rad = (-headTransform.rotationDegrees * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const unscaledX = (dx * cos - dy * sin) / headTransform.scale;
+    const unscaledY = (dx * sin + dy * cos) / headTransform.scale;
+
+    const cropX = unscaledX + extractedHead.width * 0.5;
+    const cropY = unscaledY + extractedHead.height * 0.5;
+    return { x: cropX, y: cropY };
+  };
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!headTransform || !previewCanvasRef.current) return;
+    setIsInteracting(true);
+
+    if (toolMode === 'move') {
+      const rect = previewCanvasRef.current.getBoundingClientRect();
+      dragStartRef.current = {
+        mouseX: e.clientX,
+        mouseY: e.clientY,
+        initCenterX: headTransform.centerX,
+        initCenterY: headTransform.centerY,
+      };
+    } else if ((toolMode === 'erase' || toolMode === 'restore') && extractedHead) {
+      const coords = getHeadCropCoords(e);
+      if (coords) {
+        strokePointsRef.current = [{ x: coords.x, y: coords.y, pressure: 1.0 }];
+      } else {
+        strokePointsRef.current = [];
+      }
+    }
   };
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
-      if (!isDragging || !headTransform || !previewCanvasRef.current) return;
-      const rect = previewCanvasRef.current.getBoundingClientRect();
-      const scaleFactor = 1024 / rect.width;
+      if (!isInteracting || !headTransform || !previewCanvasRef.current) return;
 
-      const deltaX = (e.clientX - dragStartRef.current.mouseX) * scaleFactor;
-      const deltaY = (e.clientY - dragStartRef.current.mouseY) * scaleFactor;
+      if (toolMode === 'move') {
+        const rect = previewCanvasRef.current.getBoundingClientRect();
+        const scaleFactor = 1024 / rect.width;
+        const deltaX = (e.clientX - dragStartRef.current.mouseX) * scaleFactor;
+        const deltaY = (e.clientY - dragStartRef.current.mouseY) * scaleFactor;
 
-      updateHeadTransform({
-        centerX: dragStartRef.current.initCenterX + deltaX,
-        centerY: dragStartRef.current.initCenterY + deltaY
-      });
+        updateHeadTransform({
+          centerX: dragStartRef.current.initCenterX + deltaX,
+          centerY: dragStartRef.current.initCenterY + deltaY,
+        });
+      } else if ((toolMode === 'erase' || toolMode === 'restore') && extractedHead) {
+        const coords = getHeadCropCoords(e);
+        if (coords) {
+          strokePointsRef.current.push({ x: coords.x, y: coords.y, pressure: 1.0 });
+        }
+      }
     },
-    [isDragging, headTransform, updateHeadTransform]
+    [isInteracting, toolMode, headTransform, extractedHead, updateHeadTransform]
   );
 
   const handleMouseUp = () => {
-    setIsDragging(false);
+    if (!isInteracting) return;
+    setIsInteracting(false);
+    if ((toolMode === 'erase' || toolMode === 'restore') && strokePointsRef.current.length > 0) {
+      applyBrushStrokeToHead(strokePointsRef.current);
+      strokePointsRef.current = [];
+    }
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -250,27 +283,6 @@ export const CartoonModeView: React.FC<CartoonModeViewProps> = ({ onBackToMain }
                 onChange={(e) => e.target.files?.[0] && loadSelfieFile(e.target.files[0])}
                 className="hidden"
               />
-
-              {/* Sample Photo Cards */}
-              <div className="w-full text-left space-y-3">
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  Or test with sample portraits
-                </div>
-                <div className="grid grid-cols-3 gap-3">
-                  {SAMPLE_PORTRAITS.map((s) => (
-                    <button
-                      key={s.id}
-                      onClick={() => loadSelfieUrl(s.path, `${s.id}.jpg`)}
-                      className="group flex flex-col p-3 rounded-xl border border-slate-800 hover:border-amber-500/50 bg-slate-900 hover:bg-slate-800/80 text-left transition shadow-md"
-                    >
-                      <div className="font-medium text-xs text-slate-200 group-hover:text-amber-400">
-                        {s.name}
-                      </div>
-                      <div className="text-[11px] text-slate-400 mt-1 line-clamp-1">{s.desc}</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
             </div>
           </div>
         )}
@@ -323,6 +335,90 @@ export const CartoonModeView: React.FC<CartoonModeViewProps> = ({ onBackToMain }
                       <div className="text-xs text-slate-500">No head extracted</div>
                     )}
                   </div>
+                </div>
+
+                {/* 2. Interactive Head & Mask Tools */}
+                <div className="space-y-3 border-t border-slate-800/80 pt-4">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center justify-between">
+                    <span>Interactive Tools</span>
+                    <div className="flex items-center space-x-1">
+                      <button
+                        onClick={undo}
+                        disabled={!canUndo}
+                        className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200 disabled:opacity-30 disabled:hover:bg-transparent transition"
+                        title="Undo mask edit"
+                      >
+                        <Undo2 className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={redo}
+                        disabled={!canRedo}
+                        className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200 disabled:opacity-30 disabled:hover:bg-transparent transition"
+                        title="Redo mask edit"
+                      >
+                        <Redo2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <button
+                      onClick={() => setToolMode('move')}
+                      className={`flex items-center justify-center space-x-1 py-1.5 px-2 rounded-lg border text-xs font-medium transition ${
+                        toolMode === 'move'
+                          ? 'bg-amber-500/20 border-amber-500 text-amber-300'
+                          : 'bg-slate-800/60 border-slate-700/60 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Move className="w-3.5 h-3.5" />
+                      <span>Move</span>
+                    </button>
+                    <button
+                      onClick={() => setToolMode('erase')}
+                      className={`flex items-center justify-center space-x-1 py-1.5 px-2 rounded-lg border text-xs font-medium transition ${
+                        toolMode === 'erase'
+                          ? 'bg-rose-500/20 border-rose-500 text-rose-300'
+                          : 'bg-slate-800/60 border-slate-700/60 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Eraser className="w-3.5 h-3.5" />
+                      <span>Erase</span>
+                    </button>
+                    <button
+                      onClick={() => setToolMode('restore')}
+                      className={`flex items-center justify-center space-x-1 py-1.5 px-2 rounded-lg border text-xs font-medium transition ${
+                        toolMode === 'restore'
+                          ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
+                          : 'bg-slate-800/60 border-slate-700/60 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Paintbrush className="w-3.5 h-3.5" />
+                      <span>Restore</span>
+                    </button>
+                  </div>
+
+                  {toolMode !== 'move' && (
+                    <div className="space-y-1.5 pt-1">
+                      <div className="flex justify-between text-xs text-slate-300">
+                        <span>Brush Size</span>
+                        <span className="font-mono text-slate-400">{brushSize} px</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="6"
+                        max="80"
+                        step="2"
+                        value={brushSize}
+                        onChange={(e) => setBrushSize(parseInt(e.target.value, 10))}
+                        className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                      />
+                      <div className="text-[11px] text-slate-500 leading-tight">
+                        {toolMode === 'erase'
+                          ? 'Drag on the head to erase background fragments.'
+                          : 'Drag on the head to restore camera pixels.'}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* 2. Head Transform Controls */}
@@ -530,7 +626,11 @@ export const CartoonModeView: React.FC<CartoonModeViewProps> = ({ onBackToMain }
                   onMouseUp={handleMouseUp}
                   onMouseLeave={handleMouseUp}
                   className={`max-w-[85vh] max-h-[85vh] object-contain transition-transform select-none ${
-                    isDragging ? 'cursor-grabbing' : 'cursor-grab'
+                    toolMode === 'move'
+                      ? isInteracting
+                        ? 'cursor-grabbing'
+                        : 'cursor-grab'
+                      : 'cursor-crosshair'
                   }`}
                   style={{
                     filter: borderThickness > 0 ? 'drop-shadow(0 12px 24px rgba(0,0,0,0.25))' : 'none'

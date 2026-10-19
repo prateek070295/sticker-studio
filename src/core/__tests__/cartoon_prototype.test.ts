@@ -102,7 +102,7 @@ describe('Sticker Studio V1.4 — Cartoon Sticker Prototype ("HI!" Waving)', () 
       expect(transform.scale).toBeCloseTo(expectedScale, 2);
       expect(transform.rotationDegrees).toBe(0);
       expect(transform.centerX).toBeCloseTo(512, 0);
-      expect(transform.centerY).toBeCloseTo(402, 0);
+      expect(transform.centerY).toBeCloseTo(412, 0);
 
       // Verifies autoPlacement is saved for reset
       expect(transform.autoPlacement.scale).toBe(transform.scale);

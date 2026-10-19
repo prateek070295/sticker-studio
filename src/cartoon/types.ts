@@ -111,6 +111,12 @@ export interface ExtractedHeadResult {
   };
   /** Refined 8-bit alpha mask (0 - 255) for the cropped head */
   alphaMask: Uint8Array;
+  /** Raw binary mask (0 or 1) of the cropped head prior to alpha feathering */
+  rawCropMask?: Uint8Array;
+  /** Front-only canvas (face, eyes, ears, skull hair, and neck) for true rear-hair layering */
+  frontCanvas?: HTMLCanvasElement;
+  /** Rear-only canvas (lower hair below chin line) for true rear-hair layering */
+  rearHairCanvas?: HTMLCanvasElement;
   /** Detected face landmarks if available */
   landmarks: FaceLandmarks | null;
 }
@@ -133,5 +139,11 @@ export interface CartoonProjectData {
     smoothness: number;
     feather: number;
   };
+  /** Lossless PNG data URL of extracted head for reproducible reopening without re-segmentation */
+  headPngDataUrl?: string;
+  /** Base64-encoded crop alpha mask */
+  alphaMaskBase64?: string;
+  /** Base64-encoded raw crop mask */
+  rawCropMaskBase64?: string;
   dateModified: string;
 }

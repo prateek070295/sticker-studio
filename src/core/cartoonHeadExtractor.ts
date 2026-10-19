@@ -139,13 +139,9 @@ export async function extractPhotographicHead(
   const neckMinX = eyeMid.x - eyeDist * 0.95;
   const neckMaxX = eyeMid.x + eyeDist * 0.95;
 
-  // 4. Construct Full-Resolution Binary Head Mask & Vertical Taper Map
+  // 4. Construct Full-Resolution Binary Head Mask
   const binaryMask = new Uint8Array(W * H);
-  const hairTaperMap = new Float32Array(W * H);
-  hairTaperMap.fill(1.0);
-
   const centerHairDepth = faceBox.height * hairExtentRatio;
-  const taperZone = Math.max(16, Math.min(48, faceBox.height * 0.20));
 
   if (rawCategoryMask && modelW > 0 && modelH > 0) {
     for (let y = 0; y < H; y++) {
@@ -170,13 +166,9 @@ export async function extractPhotographicHead(
             isIncluded = true;
           }
         } else if (cat === 1) {
-          // 1 = Hair: bounded by anatomical shoulder drape with soft tip falloff
+          // 1 = Hair: bounded by anatomical shoulder drape
           if (y <= maxHairY) {
             isIncluded = true;
-            if (y > maxHairY - taperZone) {
-              const taper = (maxHairY - y) / taperZone;
-              hairTaperMap[maskRowOffset + x] = Math.max(0, Math.min(1.0, taper));
-            }
           }
         } else if (cat === 2) {
           // 2 = Body-skin: include if within neck anchor zone below chin
@@ -261,20 +253,13 @@ export async function extractPhotographicHead(
     }
   }
 
-  // Continuous 8-bit alpha matte (0..255)
-  const refinedAlpha = refineArtworkAlpha(cropBinaryMask, cropW, cropH, smoothness, feather);
+  // Guarantee strictly zero disconnected fragments survive in crop
+  const seedCropX = Math.max(0, Math.min(cropW - 1, seedX - cropX));
+  const seedCropY = Math.max(0, Math.min(cropH - 1, seedY - cropY));
+  const cleanCropMask = isolateConnectedHeadComponent(cropBinaryMask, cropW, cropH, seedCropX, seedCropY);
 
-  // Modulate alpha with hairTaperMap to softly feather ends of long hair without flat cuts
-  for (let cy = 0; cy < cropH; cy++) {
-    const srcRow = (cropY + cy) * W;
-    const dstRow = cy * cropW;
-    for (let cx = 0; cx < cropW; cx++) {
-      const taper = hairTaperMap[srcRow + (cropX + cx)];
-      if (taper < 1.0) {
-        refinedAlpha[dstRow + cx] = Math.round(refinedAlpha[dstRow + cx] * taper);
-      }
-    }
-  }
+  // Continuous 8-bit alpha matte (0..255) from clean connected component
+  const refinedAlpha = refineArtworkAlpha(cleanCropMask, cropW, cropH, smoothness, feather);
 
   // 8. Render photographic crop to output canvas
   const headCanvas = document.createElement('canvas');
@@ -294,14 +279,123 @@ export async function extractPhotographicHead(
   }
   headCtx.putImageData(headImgData, 0, 0);
 
+  const { frontCanvas, rearHairCanvas } = separateFrontAndRearHairCanvases(
+    headCanvas,
+    refinedAlpha,
+    cropBounds,
+    landmarks
+  );
+
   return {
     canvas: headCanvas,
+    frontCanvas,
+    rearHairCanvas,
+    rawCropMask: cleanCropMask,
     width: cropW,
     height: cropH,
     cropBounds,
     alphaMask: refinedAlpha,
     landmarks,
   };
+}
+
+/**
+ * Separates head artwork into front layer (face, ears, glasses, neck) and rear layer (lower descending hair)
+ * for natural character composition behind the cartoon body.
+ */
+export function separateFrontAndRearHairCanvases(
+  headCanvas: HTMLCanvasElement,
+  alphaMask: Uint8Array,
+  cropBounds: { x: number; y: number; width: number; height: number },
+  landmarks: FaceLandmarks | null
+): { frontCanvas: HTMLCanvasElement; rearHairCanvas: HTMLCanvasElement } {
+  const cropW = headCanvas.width;
+  const cropH = headCanvas.height;
+  const cropX = cropBounds.x;
+  const cropY = cropBounds.y;
+
+  const chinY = landmarks?.mouthCenter
+    ? landmarks.mouthCenter.y + (landmarks.mouthCenter.y - (landmarks.noseTip?.y ?? landmarks.mouthCenter.y - 30)) * 0.7
+    : (landmarks?.boundingBox ? landmarks.boundingBox.originY + landmarks.boundingBox.height * 0.95 : cropY + cropH * 0.65);
+
+  const faceBox = landmarks?.boundingBox ?? {
+    originX: cropX + cropW * 0.25,
+    originY: cropY + cropH * 0.15,
+    width: cropW * 0.5,
+    height: cropH * 0.5,
+  };
+
+  const eyeMid = landmarks?.eyeMidpoint ?? {
+    x: faceBox.originX + faceBox.width * 0.5,
+    y: faceBox.originY + faceBox.height * 0.4,
+  };
+  const eyeDist = landmarks?.eyeDistance ?? faceBox.width * 0.4;
+
+  const maxNeckDepth = Math.min(48, faceBox.height * 0.24);
+  const maxNeckY = chinY + maxNeckDepth;
+  const neckMinX = eyeMid.x - eyeDist * 0.95;
+  const neckMaxX = eyeMid.x + eyeDist * 0.95;
+
+  const chinCropY = chinY - cropY;
+  const neckMinCropX = neckMinX - cropX;
+  const neckMaxCropX = neckMaxX - cropX;
+  const maxNeckCropY = maxNeckY - cropY;
+
+  const frontCanvas = document.createElement('canvas');
+  frontCanvas.width = cropW;
+  frontCanvas.height = cropH;
+  const frontCtx = frontCanvas.getContext('2d');
+  if (!frontCtx) throw new Error('Failed to create front canvas context');
+  const frontImgData = frontCtx.createImageData(cropW, cropH);
+  const frontPixels = frontImgData.data;
+
+  const rearHairCanvas = document.createElement('canvas');
+  rearHairCanvas.width = cropW;
+  rearHairCanvas.height = cropH;
+  const rearCtx = rearHairCanvas.getContext('2d');
+  if (!rearCtx) throw new Error('Failed to create rear hair canvas context');
+  const rearImgData = rearCtx.createImageData(cropW, cropH);
+  const rearPixels = rearImgData.data;
+
+  const headCtx = headCanvas.getContext('2d');
+  const headImgData = headCtx ? headCtx.getImageData(0, 0, cropW, cropH) : null;
+  const pixels = headImgData ? headImgData.data : new Uint8ClampedArray(cropW * cropH * 4);
+
+  for (let cy = 0; cy < cropH; cy++) {
+    const rowOffset = cy * cropW;
+    for (let cx = 0; cx < cropW; cx++) {
+      const idx = rowOffset + cx;
+      const pIdx = idx * 4;
+      const a = alphaMask[idx];
+      if (a === 0) continue;
+
+      const r = pixels[pIdx];
+      const g = pixels[pIdx + 1];
+      const b = pixels[pIdx + 2];
+
+      const isNeck = cx >= neckMinCropX && cx <= neckMaxCropX && cy <= maxNeckCropY;
+      const isBelowChin = cy > chinCropY;
+
+      if (isBelowChin && !isNeck) {
+        // Lower lateral or descending hair -> rear hair layer
+        rearPixels[pIdx] = r;
+        rearPixels[pIdx + 1] = g;
+        rearPixels[pIdx + 2] = b;
+        rearPixels[pIdx + 3] = a;
+      } else {
+        // Skull, face, ears, glasses, upper hair, and neck anchor -> front layer
+        frontPixels[pIdx] = r;
+        frontPixels[pIdx + 1] = g;
+        frontPixels[pIdx + 2] = b;
+        frontPixels[pIdx + 3] = a;
+      }
+    }
+  }
+
+  frontCtx.putImageData(frontImgData, 0, 0);
+  rearCtx.putImageData(rearImgData, 0, 0);
+
+  return { frontCanvas, rearHairCanvas };
 }
 
 /**

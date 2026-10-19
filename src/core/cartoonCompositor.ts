@@ -7,6 +7,18 @@
 import { CartoonTemplateManifest, ExtractedHeadResult, HeadTransform } from '../cartoon/types';
 import { computeEuclideanDistanceTransform } from './edt';
 import { applyContourSmoothing } from './composer';
+import { extractPhotographicHead } from './cartoonHeadExtractor';
+import { HI_WAVING_TEMPLATE } from '../cartoon/templates/hiWaving';
+
+if (typeof window !== 'undefined') {
+  (window as any).cartoonProductionPipeline = {
+    extractPhotographicHead,
+    renderCartoonArtwork,
+    generateCartoonStickerDieCut,
+    computeInitialHeadPlacement,
+    HI_WAVING_TEMPLATE,
+  };
+}
 
 /**
  * Computes optimal initial head scale, rotation, and placement
@@ -165,15 +177,20 @@ export async function renderCartoonArtwork(
   const halfW = head.width * 0.5;
   const halfH = head.height * 0.5;
 
-  // Optional Under-Layer — Photographic Head behind body (when hair behind body is selected)
+  // When hairBehindBody is enabled:
+  // Layer 0: Rear hair (lower hair below chin line) behind torso
+  // Layer 1: Back SVG (torso, arms, body)
+  // Layer 2: Front Head (face, eyes, ears, skull hair, and neck anchor) in front of torso
+  // Layer 3: Front SVG (collar/hoodie trim over bottom of neck)
   if (transform.hairBehindBody) {
+    const rearToDraw = head.rearHairCanvas ?? head.canvas;
     ctx.save();
     ctx.translate(transform.centerX, transform.centerY);
     ctx.rotate((transform.rotationDegrees * Math.PI) / 180);
     ctx.scale(transform.scale, transform.scale);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(head.canvas, -halfW, -halfH, head.width, head.height);
+    ctx.drawImage(rearToDraw, -halfW, -halfH, head.width, head.height);
     ctx.restore();
   }
 
@@ -181,14 +198,15 @@ export async function renderCartoonArtwork(
   const backCanvas = await rasterizeSvgToCanvas(template.layers.backSvg, W, H);
   ctx.drawImage(backCanvas, 0, 0);
 
-  // Layer 2 — Photographic Head (Transformed)
+  // Layer 2 — Photographic Head (Front face/neck when hairBehindBody is true, or full head when false)
+  const frontToDraw = transform.hairBehindBody ? (head.frontCanvas ?? head.canvas) : head.canvas;
   ctx.save();
   ctx.translate(transform.centerX, transform.centerY);
   ctx.rotate((transform.rotationDegrees * Math.PI) / 180);
   ctx.scale(transform.scale, transform.scale);
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(head.canvas, -halfW, -halfH, head.width, head.height);
+  ctx.drawImage(frontToDraw, -halfW, -halfH, head.width, head.height);
   ctx.restore();
 
   // Layer 3 — Front SVG (Collar, lapels, drawstrings overlapping lower neck)
