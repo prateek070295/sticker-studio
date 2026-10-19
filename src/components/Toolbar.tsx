@@ -15,7 +15,8 @@ import {
   CheckCircle2,
   FolderOpen,
   Save,
-  Sparkles
+  Sparkles,
+  Smile
 } from 'lucide-react';
 import { ViewMode, AppMode } from '../types';
 
@@ -165,6 +166,18 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             </button>
           </div>
         )}
+
+        {/* Prototype V1.4 Launcher */}
+        <button
+          onClick={() => {
+            window.location.hash = '#cartoon';
+          }}
+          className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200/80 transition cursor-pointer shadow-2xs"
+          title="Try V1.4 Personalized Cartoon Sticker Prototype (#cartoon)"
+        >
+          <Smile className="w-3.5 h-3.5 text-amber-600" />
+          <span>Cartoon Prototype</span>
+        </button>
 
         <div className="h-6 w-px bg-neutral-200 mx-1" />
 
