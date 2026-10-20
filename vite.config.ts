@@ -35,6 +35,20 @@ export default defineConfig({
               },
             },
           },
+          {
+            urlPattern: ({ url }) => url.hostname.includes('huggingface.co') || url.hostname.includes('hf.co') || url.hostname.includes('jsdelivr.net'),
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'transformers-offline-cache',
+              expiration: {
+                maxEntries: 50,
+                maxAgeSeconds: 60 * 24 * 60 * 60, // 60 days
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
         ],
       },
       manifest: {

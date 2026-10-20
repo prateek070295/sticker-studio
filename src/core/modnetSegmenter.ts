@@ -11,29 +11,38 @@ export async function getModnetPipeline(onProgress?: (message: string) => void) 
   if (pipelinePromise) return pipelinePromise;
 
   pipelinePromise = (async () => {
-    onProgress?.('Loading High-Quality portrait matting model (MODNet)...');
-    const { pipeline, env } = await import('@huggingface/transformers');
+    try {
+      onProgress?.('Loading High-Quality portrait matting model (MODNet)...');
+      const { pipeline, env } = await import('@huggingface/transformers');
 
-    // In browser, ensure offline caching is enabled
-    if (typeof window !== 'undefined') {
-      env.allowLocalModels = false;
-      env.useBrowserCache = true;
+      // In browser, ensure offline caching is enabled
+      if (typeof window !== 'undefined') {
+        env.allowLocalModels = false;
+        env.useBrowserCache = true;
+      }
+
+      const segmenter = await (pipeline as any)('background-removal', 'Xenova/modnet', {
+        progress_callback: (progressInfo: any) => {
+          if (progressInfo && progressInfo.status === 'progress' && progressInfo.file) {
+            const pct = Math.round(progressInfo.progress || 0);
+            onProgress?.(`Caching neural weights (${progressInfo.file}): ${pct}%`);
+          } else if (progressInfo && progressInfo.status === 'initiate') {
+            onProgress?.(`Initializing ${progressInfo.file}...`);
+          } else if (progressInfo && progressInfo.status === 'ready') {
+            onProgress?.('Neural model ready.');
+          }
+        },
+      });
+
+      return segmenter;
+    } catch (err: any) {
+      pipelinePromise = null;
+      const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+      if (isOffline) {
+        throw new Error('High-Quality portrait model is not yet cached for offline use. Please connect to the internet once to download the model (~25MB), or switch to Standard mode.');
+      }
+      throw err;
     }
-
-    const segmenter = await pipeline('image-segmentation', 'Xenova/modnet', {
-      progress_callback: (progressInfo: any) => {
-        if (progressInfo && progressInfo.status === 'progress' && progressInfo.file) {
-          const pct = Math.round(progressInfo.progress || 0);
-          onProgress?.(`Caching neural weights (${progressInfo.file}): ${pct}%`);
-        } else if (progressInfo && progressInfo.status === 'initiate') {
-          onProgress?.(`Initializing ${progressInfo.file}...`);
-        } else if (progressInfo && progressInfo.status === 'ready') {
-          onProgress?.('Neural model ready.');
-        }
-      },
-    });
-
-    return segmenter;
   })();
 
   return pipelinePromise;
@@ -84,14 +93,26 @@ export async function segmentPortraitModnet(
   const output = await segmenter(inputSource);
   const inferDurationMs = performance.now() - t0;
 
-  if (!output || !output[0] || !output[0].mask) {
-    throw new Error('MODNet returned empty segmentation output');
-  }
+  let mW: number;
+  let mH: number;
+  let mData: Uint8Array | Uint8ClampedArray;
+  let isRgba = false;
 
-  const rawMask = output[0].mask;
-  const mW = rawMask.width;
-  const mH = rawMask.height;
-  const mData: Uint8Array = rawMask.data;
+  if (output && output.data && output.width && output.height) {
+    // RawImage from background-removal pipeline
+    mW = output.width;
+    mH = output.height;
+    mData = output.data;
+    isRgba = output.channels === 4 || output.data.length === mW * mH * 4;
+  } else if (output && output[0] && output[0].mask) {
+    // [{ mask }] from image-segmentation pipeline
+    mW = output[0].mask.width;
+    mH = output[0].mask.height;
+    mData = output[0].mask.data;
+    isRgba = false;
+  } else {
+    throw new Error('MODNet returned empty or unrecognized segmentation output');
+  }
 
   const alphaMatte = new Uint8Array(W * H);
   const binaryMask = new Uint8Array(W * H);
@@ -99,7 +120,7 @@ export async function segmentPortraitModnet(
 
   if (mW === W && mH === H) {
     for (let i = 0; i < W * H; i++) {
-      const a = mData[i];
+      const a = isRgba ? mData[i * 4 + 3] : mData[i];
       alphaMatte[i] = a;
       if (a >= 128) {
         binaryMask[i] = 1;
@@ -120,10 +141,10 @@ export async function segmentPortraitModnet(
         const x1 = Math.min(mW - 1, x0 + 1);
         const dx = sx - x0;
 
-        const v00 = mData[y0 * mW + x0];
-        const v10 = mData[y0 * mW + x1];
-        const v01 = mData[y1 * mW + x0];
-        const v11 = mData[y1 * mW + x1];
+        const v00 = isRgba ? mData[(y0 * mW + x0) * 4 + 3] : mData[y0 * mW + x0];
+        const v10 = isRgba ? mData[(y0 * mW + x1) * 4 + 3] : mData[y0 * mW + x1];
+        const v01 = isRgba ? mData[(y1 * mW + x0) * 4 + 3] : mData[y1 * mW + x0];
+        const v11 = isRgba ? mData[(y1 * mW + x1) * 4 + 3] : mData[y1 * mW + x1];
 
         const top = v00 * (1 - dx) + v10 * dx;
         const bot = v01 * (1 - dx) + v11 * dx;
@@ -159,7 +180,10 @@ export async function isModnetCached(): Promise<boolean> {
     const keys = await caches.keys();
     for (const key of keys) {
       if (key.includes('transformers') || key.includes('modnet')) {
-        return true;
+        const cache = await caches.open(key);
+        const reqs = await cache.keys();
+        const hasModel = reqs.some(r => r.url.includes('modnet') || r.url.endsWith('.onnx') || r.url.includes('onnx'));
+        if (hasModel) return true;
       }
     }
   } catch {

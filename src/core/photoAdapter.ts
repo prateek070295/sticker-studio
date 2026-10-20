@@ -75,6 +75,9 @@ interface PhotoMatteCacheEntry {
   manualDeltaRef?: Int8Array | null;
   precomputedAlphaMatteRef?: Uint8Array;
   precomputedDecontaminatedRgbRef?: Uint8ClampedArray;
+  edgeTrim: number;
+  bottomFinish?: string;
+  bottomCurveRadius?: number;
   primaryBoxKey: string;
   protectedBoxesKey: string;
   result: IntermediateMatteResult;
@@ -168,6 +171,9 @@ export function composePhotoCutout(
     lastMatteCache.manualDeltaRef === finishingOptions?.manualDelta &&
     lastMatteCache.precomputedAlphaMatteRef === finishingOptions?.precomputedAlphaMatte &&
     lastMatteCache.precomputedDecontaminatedRgbRef === finishingOptions?.precomputedDecontaminatedRgb &&
+    lastMatteCache.edgeTrim === (finishingOptions?.edgeTrim ?? 0) &&
+    lastMatteCache.bottomFinish === finishingOptions?.bottomFinish &&
+    lastMatteCache.bottomCurveRadius === finishingOptions?.bottomCurveRadius &&
     lastMatteCache.primaryBoxKey === primaryBoxKey &&
     lastMatteCache.protectedBoxesKey === protectedBoxesKey
   ) {
@@ -196,7 +202,11 @@ export function composePhotoCutout(
         const delta = finishingOptions.manualDelta;
         for (let i = 0; i < totalPixels; i++) {
           if (delta[i] === -1) alphaMask[i] = 0;
-          else if (delta[i] === 1) alphaMask[i] = 255;
+          else if (delta[i] === 1) {
+            alphaMask[i] = (finishingOptions.precomputedAlphaMatte[i] > 0)
+              ? finishingOptions.precomputedAlphaMatte[i]
+              : 255;
+          }
         }
       }
       if (finishingOptions.precomputedDecontaminatedRgb && finishingOptions.precomputedDecontaminatedRgb.length === sourceRgba.length) {
@@ -236,6 +246,11 @@ export function composePhotoCutout(
         artworkEdgeSmoothness,
         artworkEdgeFeather
       );
+    }
+
+    // Apply edge defringing and bottom treatment directly to the continuous alpha mask
+    if (finishingOptions && ((finishingOptions.edgeTrim && finishingOptions.edgeTrim > 0) || (finishingOptions.bottomFinish && finishingOptions.bottomFinish !== 'flat'))) {
+      alphaMask = applyPhotoFinishing(alphaMask, sourceWidth, sourceHeight, finishingOptions);
     }
 
     // 4. Build Authoritative Photo Support Envelope
@@ -301,6 +316,9 @@ export function composePhotoCutout(
       manualDeltaRef: finishingOptions?.manualDelta,
       precomputedAlphaMatteRef: finishingOptions?.precomputedAlphaMatte,
       precomputedDecontaminatedRgbRef: finishingOptions?.precomputedDecontaminatedRgb,
+      edgeTrim: finishingOptions?.edgeTrim ?? 0,
+      bottomFinish: finishingOptions?.bottomFinish,
+      bottomCurveRadius: finishingOptions?.bottomCurveRadius,
       primaryBoxKey,
       protectedBoxesKey,
       result: intermediate,
@@ -453,7 +471,7 @@ export function trimMaskEdges(
   const threshold = trimPixels + 0.4;
   for (let i = 0; i < size; i++) {
     if (mask[i] > 0 && dist[i] >= threshold) {
-      trimmed[i] = 1;
+      trimmed[i] = mask[i];
     }
   }
 

@@ -57,7 +57,7 @@ export interface UsePhotoModeReturn {
   stageTimings: Record<string, number>;
   importPhoto: (file: File) => Promise<void>;
   importFromDataUrl: (dataUrl: string, name: string) => Promise<void>;
-  detectPeople: () => Promise<void>;
+  detectPeople: (overrideMode?: 'standard' | 'high-quality') => Promise<void>;
   removeBackground: () => Promise<void>;
   addPersonRegion: (box: BoundingBox) => Promise<void>;
   updatePersonRegion: (id: string, box: BoundingBox) => Promise<void>;
@@ -99,6 +99,7 @@ export interface PhotoHistorySnapshot {
   personRegions: PersonRegion[];
   selectedRegionId: string | null;
   manualDelta: Int8Array | null;
+  baseAlphaMatte?: Uint8Array;
   loadedAlphaMatte?: Uint8Array;
 }
 
@@ -109,6 +110,9 @@ export function getSnapshotByteSize(snapshot: PhotoHistorySnapshot): number {
   let bytes = snapshot.mask.byteLength;
   if (snapshot.manualDelta) {
     bytes += snapshot.manualDelta.byteLength;
+  }
+  if (snapshot.baseAlphaMatte) {
+    bytes += snapshot.baseAlphaMatte.byteLength;
   }
   if (snapshot.loadedAlphaMatte) {
     bytes += snapshot.loadedAlphaMatte.byteLength;
@@ -202,17 +206,20 @@ export function usePhotoMode(): UsePhotoModeReturn {
   const [stageTimings, setStageTimings] = useState<Record<string, number>>({});
   const [manualDelta, setManualDelta] = useState<Int8Array | null>(null);
   const [fallbackConfidence, setFallbackConfidence] = useState<Float32Array | undefined>(undefined);
+  const [baseAlphaMatte, setBaseAlphaMatte] = useState<Uint8Array | undefined>(undefined);
   const [loadedAlphaMatte, setLoadedAlphaMatte] = useState<Uint8Array | undefined>(undefined);
   const [loadedDecontaminatedRgb, setLoadedDecontaminatedRgb] = useState<Uint8ClampedArray | undefined>(undefined);
+  const currentRunIdRef = useRef<number>(0);
 
   const clearLoadedPrecomputed = useCallback(() => {
     if (extractionMode !== 'high-quality') {
+      setBaseAlphaMatte(undefined);
       setLoadedAlphaMatte(undefined);
       setLoadedDecontaminatedRgb(undefined);
     }
   }, [extractionMode]);
 
-  // Undo / Redo history with coherent snapshots (mask, personRegions, selection, manualDelta, loadedAlphaMatte)
+  // Undo / Redo history with coherent snapshots (mask, personRegions, selection, manualDelta, baseAlphaMatte, loadedAlphaMatte)
   const undoStackRef = useRef<PhotoHistorySnapshot[]>([]);
   const redoStackRef = useRef<PhotoHistorySnapshot[]>([]);
   const [historyVersion, setHistoryVersion] = useState<number>(0);
@@ -224,13 +231,14 @@ export function usePhotoMode(): UsePhotoModeReturn {
       personRegions: clonePersonRegions(personRegions),
       selectedRegionId,
       manualDelta: manualDelta ? new Int8Array(manualDelta) : null,
+      baseAlphaMatte: baseAlphaMatte ? new Uint8Array(baseAlphaMatte) : undefined,
       loadedAlphaMatte: loadedAlphaMatte ? new Uint8Array(loadedAlphaMatte) : undefined,
     };
     undoStackRef.current.push(snapshot);
     enforceHistoryBudget(undoStackRef.current, MAX_HISTORY_DEPTH, MAX_HISTORY_BYTES);
     redoStackRef.current = [];
     setHistoryVersion(v => v + 1);
-  }, [mask, personRegions, selectedRegionId, manualDelta, loadedAlphaMatte]);
+  }, [mask, personRegions, selectedRegionId, manualDelta, baseAlphaMatte, loadedAlphaMatte]);
 
   useEffect(() => {
     if (!sourceImage) return;
@@ -314,7 +322,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
         primaryRegionBox: primaryRegion?.box,
         protectedBoxes: personRegions.filter(r => r.included).map(r => r.box),
         manualDelta,
-        precomputedAlphaMatte: loadedAlphaMatte,
+        precomputedAlphaMatte: loadedAlphaMatte ?? baseAlphaMatte,
         precomputedDecontaminatedRgb: loadedDecontaminatedRgb,
       }
     );
@@ -337,6 +345,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     bottomFinish,
     bottomCurveRadius,
     loadedAlphaMatte,
+    baseAlphaMatte,
     loadedDecontaminatedRgb,
   ]);
 
@@ -383,14 +392,20 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setIsReviewMode(false);
     setStageTimings({});
     setManualDelta(null);
+    setBaseAlphaMatte(undefined);
+    setLoadedAlphaMatte(undefined);
+    setLoadedDecontaminatedRgb(undefined);
+    currentRunIdRef.current++;
     undoStackRef.current = [];
     redoStackRef.current = [];
     setHistoryVersion(v => v + 1);
   }, []);
 
   // Run Detector-Guided People Detection and Regional Crop Segmentation
-  const detectPeople = useCallback(async () => {
+  // Run Detector-Guided People Detection and Regional Crop Segmentation
+  const detectPeople = useCallback(async (overrideMode?: 'standard' | 'high-quality') => {
     if (!sourceImage) return;
+    const runId = ++currentRunIdRef.current;
     setIsProcessing(true);
     setProgressMessage('Scanning photo for people...');
 
@@ -402,25 +417,34 @@ export function usePhotoMode(): UsePhotoModeReturn {
       const detected = await detectPeopleInPhoto(sourceImage, DEFAULT_MIN_PERSON_AREA_RATIO, (msg) => {
         setProgressMessage(msg);
       });
+      if (runId !== currentRunIdRef.current) return;
       timings.detectionMs = performance.now() - tDet0;
 
       const W = sourceImage.width;
       const H = sourceImage.height;
 
-      if (extractionMode === 'high-quality') {
-        if (detected.length <= 1) {
+      const includedPeople = detected.filter(r => r.included);
+      const effectiveMode = overrideMode ?? extractionMode;
+
+      if (effectiveMode === 'high-quality') {
+        if (includedPeople.length <= 1) {
           // Single-person portrait: run MODNet on-device
+          setExtractionModeState('high-quality');
           setProgressMessage('Running on-device High-Quality portrait matting (MODNet)...');
           const tMod0 = performance.now();
           const modnetRes = await segmentPortraitModnet(sourceImage, (msg) => setProgressMessage(msg));
+          if (runId !== currentRunIdRef.current) return;
           timings.segmentationMs = performance.now() - tMod0;
           timings.totalMs = performance.now() - tTotal0;
 
           if (mask) pushUndoSnapshot();
+          setBaseAlphaMatte(modnetRes.alphaMatte);
           setLoadedAlphaMatte(modnetRes.alphaMatte);
+          setLoadedDecontaminatedRgb(undefined);
           setMask(modnetRes.binaryMask);
           setBaseAiMask(new Uint8Array(modnetRes.binaryMask));
-          const singleRegion: PersonRegion = detected.length === 1 ? detected[0] : {
+          const primaryPerson = includedPeople[0] ?? detected[0];
+          const singleRegion: PersonRegion = primaryPerson ? { ...primaryPerson } : {
             id: 'person_modnet_1',
             label: 'P1 (MODNet)',
             box: { x: 0, y: 0, width: W, height: H },
@@ -439,9 +463,19 @@ export function usePhotoMode(): UsePhotoModeReturn {
           setProgressMessage('High-Quality portrait matting complete.');
           return;
         } else {
-          // Group photograph: per user directive, default groups to Standard
-          setProgressMessage(`Group photograph (${detected.length} members detected): using Standard extraction to protect all members.`);
+          // Group photograph: force Standard mode and clear any MODNet alpha
+          setExtractionModeState('standard');
+          setBaseAlphaMatte(undefined);
+          setLoadedAlphaMatte(undefined);
+          setLoadedDecontaminatedRgb(undefined);
+          setProgressMessage(`Group photograph (${includedPeople.length} members detected): using Standard extraction to protect all members.`);
         }
+      } else {
+        // Standard mode: ensure MODNet alpha is cleared
+        setExtractionModeState('standard');
+        setBaseAlphaMatte(undefined);
+        setLoadedAlphaMatte(undefined);
+        setLoadedDecontaminatedRgb(undefined);
       }
 
       if (detected.length === 0) {
@@ -449,6 +483,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
         setProgressMessage('No discrete person boxes found; running whole-frame segmentation...');
         const tSeg0 = performance.now();
         const singleResult = await segmentPhotoForeground(sourceImage);
+        if (runId !== currentRunIdRef.current) return;
         timings.segmentationMs = performance.now() - tSeg0;
         timings.totalMs = performance.now() - tTotal0;
 
@@ -479,6 +514,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
         const reg = detected[i];
         setProgressMessage(`Segmenting person ${i + 1} of ${detected.length}...`);
         const { cropMask, cropBounds, cropConfidence } = await segmentPersonCrop(sourceImage, reg, DEFAULT_CROP_MARGIN_RATIO);
+        if (runId !== currentRunIdRef.current) return;
         processedRegions.push({
           ...reg,
           cropMask,
@@ -511,7 +547,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
       console.error('Failed in detectPeople:', err);
       alert(`Person detection error: ${err?.message || err}`);
     } finally {
-      setIsProcessing(false);
+      if (runId === currentRunIdRef.current) {
+        setIsProcessing(false);
+      }
     }
   }, [sourceImage, mask, pushUndoSnapshot, clearLoadedPrecomputed, extractionMode]);
 
@@ -521,40 +559,30 @@ export function usePhotoMode(): UsePhotoModeReturn {
   }, [detectPeople]);
 
   const setExtractionMode = useCallback(async (mode: 'standard' | 'high-quality') => {
-    if (mode === extractionMode) return;
+    if (mode === extractionMode && mask) return;
     setExtractionModeState(mode);
 
-    if (!sourceImage) return;
+    // If initial detection has not run yet, only select the intended mode before initial detection
+    if (!sourceImage || !mask) return;
 
-    if (mode === 'high-quality') {
-      if (personRegions.length > 1) {
-        setProgressMessage(`High Quality (MODNet) is optimized for single-person portraits. Group photos (${personRegions.length} members) default to Standard mode.`);
+    if (mode === 'standard') {
+      if (mask) pushUndoSnapshot();
+      setBaseAlphaMatte(undefined);
+      setLoadedAlphaMatte(undefined);
+      setLoadedDecontaminatedRgb(undefined);
+      await detectPeople('standard');
+    } else {
+      // Switching to High Quality
+      const included = personRegions.filter(r => r.included);
+      if (included.length > 1) {
+        setProgressMessage(`High Quality (MODNet) is optimized for single-person portraits. Group photos (${included.length} members) default to Standard mode.`);
         setExtractionModeState('standard');
         return;
       }
-      setIsProcessing(true);
-      try {
-        if (mask) pushUndoSnapshot();
-        const res = await segmentPortraitModnet(sourceImage, msg => setProgressMessage(msg));
-        setLoadedAlphaMatte(res.alphaMatte);
-        setMask(res.binaryMask);
-        setBaseAiMask(new Uint8Array(res.binaryMask));
-        setManualDelta(null);
-        setProgressMessage('High-Quality portrait matting complete.');
-      } catch (err: any) {
-        console.error('Failed to run High Quality MODNet:', err);
-        setProgressMessage(`Could not load High Quality mode: ${err?.message || err}. Falling back to Standard.`);
-        setExtractionModeState('standard');
-      } finally {
-        setIsProcessing(false);
-      }
-    } else {
-      // Switching back to Standard
       if (mask) pushUndoSnapshot();
-      clearLoadedPrecomputed();
-      await detectPeople();
+      await detectPeople('high-quality');
     }
-  }, [extractionMode, sourceImage, personRegions, mask, pushUndoSnapshot, clearLoadedPrecomputed, detectPeople]);
+  }, [extractionMode, sourceImage, mask, personRegions, pushUndoSnapshot, detectPeople]);
 
   // Add Manual Person Region
   const addPersonRegion = useCallback(async (box: BoundingBox) => {
@@ -693,9 +721,15 @@ export function usePhotoMode(): UsePhotoModeReturn {
     const W = sourceImage.width;
     const H = sourceImage.height;
 
+    // Use visible continuous alpha support so faint hair pixels (alpha < 128) can be erased
+    const visibleAlpha = composedResult?.alphaMatte ?? loadedAlphaMatte ?? baseAlphaMatte;
     const currentAlpha = new Uint8Array(W * H);
-    for (let i = 0; i < W * H; i++) {
-      currentAlpha[i] = mask[i] > 0 ? 255 : 0;
+    if (visibleAlpha && visibleAlpha.length === W * H) {
+      currentAlpha.set(visibleAlpha);
+    } else {
+      for (let i = 0; i < W * H; i++) {
+        currentAlpha[i] = mask[i] > 0 ? 255 : 0;
+      }
     }
 
     const patch = applyBrushStroke(
@@ -728,10 +762,15 @@ export function usePhotoMode(): UsePhotoModeReturn {
       for (let dy = 0; dy < bh; dy++) {
         for (let dx = 0; dx < bw; dx++) {
           const gIdx = (by + dy) * W + (bx + dx);
-          const oldVal = mask[gIdx] > 0 ? 1 : 0;
-          const newVal = updatedMask[gIdx];
-          if (newVal !== oldVal) {
-            nextDelta[gIdx] = (newVal === 1 ? 1 : -1);
+          if (mode === 'erase') {
+            if (currentAlpha[gIdx] === 0 || currentAlpha[gIdx] < (visibleAlpha ? visibleAlpha[gIdx] : 255)) {
+              nextDelta[gIdx] = -1;
+            }
+          } else {
+            // Restore
+            if (currentAlpha[gIdx] > 0) {
+              nextDelta[gIdx] = 1;
+            }
           }
         }
       }
@@ -740,7 +779,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
       setMask(updatedMask);
       setHistoryVersion(v => v + 1);
     }
-  }, [sourceImage, mask, brushSize, manualDelta, pushUndoSnapshot]);
+  }, [sourceImage, mask, brushSize, manualDelta, pushUndoSnapshot, composedResult, loadedAlphaMatte, baseAlphaMatte]);
 
   // Undo
   const undo = useCallback(() => {
@@ -753,6 +792,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
       personRegions: clonePersonRegions(personRegions),
       selectedRegionId,
       manualDelta: manualDelta ? new Int8Array(manualDelta) : null,
+      baseAlphaMatte: baseAlphaMatte ? new Uint8Array(baseAlphaMatte) : undefined,
       loadedAlphaMatte: loadedAlphaMatte ? new Uint8Array(loadedAlphaMatte) : undefined,
     };
     redoStackRef.current.push(currentSnapshot);
@@ -762,9 +802,10 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setPersonRegions(prev.personRegions);
     setSelectedRegionId(prev.selectedRegionId);
     setManualDelta(prev.manualDelta);
+    setBaseAlphaMatte(prev.baseAlphaMatte ? new Uint8Array(prev.baseAlphaMatte) : undefined);
     setLoadedAlphaMatte(prev.loadedAlphaMatte ? new Uint8Array(prev.loadedAlphaMatte) : undefined);
     setHistoryVersion(v => v + 1);
-  }, [mask, personRegions, selectedRegionId, manualDelta, loadedAlphaMatte]);
+  }, [mask, personRegions, selectedRegionId, manualDelta, baseAlphaMatte, loadedAlphaMatte]);
 
   // Redo
   const redo = useCallback(() => {
@@ -777,6 +818,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
       personRegions: clonePersonRegions(personRegions),
       selectedRegionId,
       manualDelta: manualDelta ? new Int8Array(manualDelta) : null,
+      baseAlphaMatte: baseAlphaMatte ? new Uint8Array(baseAlphaMatte) : undefined,
       loadedAlphaMatte: loadedAlphaMatte ? new Uint8Array(loadedAlphaMatte) : undefined,
     };
     undoStackRef.current.push(currentSnapshot);
@@ -786,9 +828,10 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setPersonRegions(next.personRegions);
     setSelectedRegionId(next.selectedRegionId);
     setManualDelta(next.manualDelta);
+    setBaseAlphaMatte(next.baseAlphaMatte ? new Uint8Array(next.baseAlphaMatte) : undefined);
     setLoadedAlphaMatte(next.loadedAlphaMatte ? new Uint8Array(next.loadedAlphaMatte) : undefined);
     setHistoryVersion(v => v + 1);
-  }, [mask, personRegions, selectedRegionId, manualDelta, loadedAlphaMatte]);
+  }, [mask, personRegions, selectedRegionId, manualDelta, baseAlphaMatte, loadedAlphaMatte]);
 
   const setBorderThickness = useCallback((val: number) => {
     setBorderThicknessState(Math.max(0, Math.min(100, Math.round(val))));
@@ -1041,6 +1084,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
         fallbackConfidence: fallbackConfidence
           ? uint8ToBase64(new Uint8Array(fallbackConfidence.buffer, fallbackConfidence.byteOffset, fallbackConfidence.byteLength))
           : undefined,
+        baseAlphaMatteData: baseAlphaMatte
+          ? uint8ToBase64(baseAlphaMatte)
+          : (loadedAlphaMatte ? uint8ToBase64(loadedAlphaMatte) : undefined),
         alphaMatteData: composedResult?.alphaMatte ? uint8ToBase64(composedResult.alphaMatte) : undefined,
         decontaminatedData: composedResult?.decontaminatedRgb
           ? uint8ToBase64(new Uint8Array(composedResult.decontaminatedRgb.buffer, composedResult.decontaminatedRgb.byteOffset, composedResult.decontaminatedRgb.byteLength))
@@ -1072,6 +1118,8 @@ export function usePhotoMode(): UsePhotoModeReturn {
     accessoryMerge,
     fallbackConfidence,
     composedResult,
+    baseAlphaMatte,
+    loadedAlphaMatte,
     getBaseName,
     downloadBlob,
   ]);
@@ -1130,9 +1178,16 @@ export function usePhotoMode(): UsePhotoModeReturn {
         setFallbackConfidence(undefined);
       }
 
-      if (loaded.metadata.photoSettings.alphaMatteData) {
-        setLoadedAlphaMatte(base64ToUint8(loaded.metadata.photoSettings.alphaMatteData));
+      if (loaded.metadata.photoSettings.baseAlphaMatteData) {
+        const baseAlpha = base64ToUint8(loaded.metadata.photoSettings.baseAlphaMatteData);
+        setBaseAlphaMatte(baseAlpha);
+        setLoadedAlphaMatte(baseAlpha);
+      } else if (loaded.metadata.photoSettings.alphaMatteData) {
+        const compAlpha = base64ToUint8(loaded.metadata.photoSettings.alphaMatteData);
+        setBaseAlphaMatte(compAlpha);
+        setLoadedAlphaMatte(compAlpha);
       } else {
+        setBaseAlphaMatte(undefined);
         setLoadedAlphaMatte(undefined);
       }
 
@@ -1188,8 +1243,10 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setViewMode('sticker');
     setManualDelta(null);
     setFallbackConfidence(undefined);
+    setBaseAlphaMatte(undefined);
     setLoadedAlphaMatte(undefined);
     setLoadedDecontaminatedRgb(undefined);
+    currentRunIdRef.current++;
     setEdgeTrimState(0);
     setSmoothOutlineState(0);
     setArtworkEdgeSmoothnessState(0);

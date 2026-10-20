@@ -67,6 +67,7 @@ export interface ProjectSaveState {
     hairDetail?: number;
     accessoryMerge?: boolean;
     fallbackConfidence?: string;
+    baseAlphaMatteData?: string;
     alphaMatteData?: string;
     decontaminatedData?: string;
   };

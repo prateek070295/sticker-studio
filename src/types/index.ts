@@ -246,6 +246,7 @@ export interface ProjectMetadata {
     hairDetail?: number;
     accessoryMerge?: boolean;
     fallbackConfidence?: string; // Base64 raw Float32Array bytes for single-pass segmentation
+    baseAlphaMatteData?: string; // Base64 original immutable neural alpha matte
     alphaMatteData?: string; // Base64 resolved artwork alpha mask (1 byte/px)
     decontaminatedData?: string; // Base64 decontaminated RGBA
   };
