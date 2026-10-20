@@ -351,6 +351,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
   // Load photo file
   const importPhoto = useCallback(async (file: File) => {
+    currentRunIdRef.current++;
+    setIsProcessing(false);
+    setProgressMessage('');
     setFileName(file.name);
     const dataUrl = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
@@ -364,6 +367,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
   // Import from dataUrl
   const importFromDataUrl = useCallback(async (dataUrl: string, name: string) => {
+    const runId = ++currentRunIdRef.current;
+    setIsProcessing(false);
+    setProgressMessage('');
     setFileName(name);
     const img = new Image();
     await new Promise<void>((resolve, reject) => {
@@ -371,6 +377,8 @@ export function usePhotoMode(): UsePhotoModeReturn {
       img.onerror = reject;
       img.src = dataUrl;
     });
+
+    if (runId !== currentRunIdRef.current) return;
 
     const W = img.naturalWidth;
     const H = img.naturalHeight;
@@ -382,6 +390,8 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
     ctx.drawImage(img, 0, 0);
     const imgData = ctx.getImageData(0, 0, W, H);
+
+    if (runId !== currentRunIdRef.current) return;
 
     setSourceImage(imgData);
     setMask(null);
@@ -395,13 +405,11 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setBaseAlphaMatte(undefined);
     setLoadedAlphaMatte(undefined);
     setLoadedDecontaminatedRgb(undefined);
-    currentRunIdRef.current++;
     undoStackRef.current = [];
     redoStackRef.current = [];
     setHistoryVersion(v => v + 1);
   }, []);
 
-  // Run Detector-Guided People Detection and Regional Crop Segmentation
   // Run Detector-Guided People Detection and Regional Crop Segmentation
   const detectPeople = useCallback(async (overrideMode?: 'standard' | 'high-quality') => {
     if (!sourceImage) return;
@@ -415,7 +423,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
     try {
       const tDet0 = performance.now();
       const detected = await detectPeopleInPhoto(sourceImage, DEFAULT_MIN_PERSON_AREA_RATIO, (msg) => {
-        setProgressMessage(msg);
+        if (runId === currentRunIdRef.current) {
+          setProgressMessage(msg);
+        }
       });
       if (runId !== currentRunIdRef.current) return;
       timings.detectionMs = performance.now() - tDet0;
@@ -432,7 +442,11 @@ export function usePhotoMode(): UsePhotoModeReturn {
           setExtractionModeState('high-quality');
           setProgressMessage('Running on-device High-Quality portrait matting (MODNet)...');
           const tMod0 = performance.now();
-          const modnetRes = await segmentPortraitModnet(sourceImage, (msg) => setProgressMessage(msg));
+          const modnetRes = await segmentPortraitModnet(sourceImage, (msg) => {
+            if (runId === currentRunIdRef.current) {
+              setProgressMessage(msg);
+            }
+          });
           if (runId !== currentRunIdRef.current) return;
           timings.segmentationMs = performance.now() - tMod0;
           timings.totalMs = performance.now() - tTotal0;
@@ -544,8 +558,11 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
       setProgressMessage(`${processedRegions.length} people selected. Review the image and add anyone missing before creating your sticker.`);
     } catch (err: any) {
+      if (runId !== currentRunIdRef.current) return;
       console.error('Failed in detectPeople:', err);
-      alert(`Person detection error: ${err?.message || err}`);
+      if (typeof alert !== 'undefined') {
+        alert(`Person detection error: ${err?.message || err}`);
+      }
     } finally {
       if (runId === currentRunIdRef.current) {
         setIsProcessing(false);
@@ -589,6 +606,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     if (!sourceImage) return;
     if (box.width <= 4 || box.height <= 4) return;
 
+    const runId = ++currentRunIdRef.current;
     setIsProcessing(true);
     setProgressMessage('Segmenting manual person region...');
 
@@ -607,6 +625,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
       };
 
       const { cropMask, cropBounds, cropConfidence } = await segmentPersonCrop(sourceImage, newRegion, DEFAULT_CROP_MARGIN_RATIO);
+      if (runId !== currentRunIdRef.current) return;
       newRegion.cropMask = cropMask;
       newRegion.cropBounds = cropBounds;
       newRegion.cropConfidence = cropConfidence;
@@ -625,10 +644,15 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
       setProgressMessage(`Added ${newRegion.label}. ${updatedRegions.filter(r => r.included).length} people selected.`);
     } catch (err: any) {
+      if (runId !== currentRunIdRef.current) return;
       console.error('Failed to add manual person region:', err);
-      alert(`Manual region segmentation error: ${err?.message || err}`);
+      if (typeof alert !== 'undefined') {
+        alert(`Manual region segmentation error: ${err?.message || err}`);
+      }
     } finally {
-      setIsProcessing(false);
+      if (runId === currentRunIdRef.current) {
+        setIsProcessing(false);
+      }
     }
   }, [sourceImage, personRegions, mask, manualDelta, pushUndoSnapshot]);
 
@@ -638,6 +662,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
     const regionIdx = personRegions.findIndex(r => r.id === id);
     if (regionIdx === -1) return;
 
+    const runId = ++currentRunIdRef.current;
     setIsProcessing(true);
     setProgressMessage('Updating and re-segmenting person region...');
 
@@ -647,6 +672,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
       const targetRegion = { ...personRegions[regionIdx], box: newBox };
       const { cropMask, cropBounds, cropConfidence } = await segmentPersonCrop(sourceImage, targetRegion, DEFAULT_CROP_MARGIN_RATIO);
+      if (runId !== currentRunIdRef.current) return;
       targetRegion.cropMask = cropMask;
       targetRegion.cropBounds = cropBounds;
       targetRegion.cropConfidence = cropConfidence;
@@ -665,9 +691,12 @@ export function usePhotoMode(): UsePhotoModeReturn {
       setHistoryVersion(v => v + 1);
       setProgressMessage(`Updated ${targetRegion.label}.`);
     } catch (err: any) {
+      if (runId !== currentRunIdRef.current) return;
       console.error('Failed to update region:', err);
     } finally {
-      setIsProcessing(false);
+      if (runId === currentRunIdRef.current) {
+        setIsProcessing(false);
+      }
     }
   }, [sourceImage, personRegions, mask, manualDelta, pushUndoSnapshot, clearLoadedPrecomputed]);
 
@@ -1126,6 +1155,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
   // Load Photo Project
   const loadPhotoProject = useCallback((loaded: LoadedProjectData) => {
+    currentRunIdRef.current++;
+    setIsProcessing(false);
+    setProgressMessage('');
     setSourceImage(loaded.sourceImage);
     setFileName(loaded.metadata.name ? `${loaded.metadata.name}.png` : 'photo.png');
 
@@ -1231,6 +1263,9 @@ export function usePhotoMode(): UsePhotoModeReturn {
   }, []);
 
   const resetPhoto = useCallback(() => {
+    currentRunIdRef.current++;
+    setIsProcessing(false);
+    setProgressMessage('');
     setExtractionModeState('standard');
     setSourceImage(null);
     setMask(null);
@@ -1246,7 +1281,6 @@ export function usePhotoMode(): UsePhotoModeReturn {
     setBaseAlphaMatte(undefined);
     setLoadedAlphaMatte(undefined);
     setLoadedDecontaminatedRgb(undefined);
-    currentRunIdRef.current++;
     setEdgeTrimState(0);
     setSmoothOutlineState(0);
     setArtworkEdgeSmoothnessState(0);
