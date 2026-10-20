@@ -241,6 +241,7 @@ export interface ProjectMetadata {
     artworkEdgeSmoothness?: number;
     artworkEdgeFeather?: number;
     qualityMode?: 'fast' | 'better' | 'best';
+    extractionMode?: 'standard' | 'high-quality';
     decontaminateEdge?: boolean;
     hairDetail?: number;
     accessoryMerge?: boolean;

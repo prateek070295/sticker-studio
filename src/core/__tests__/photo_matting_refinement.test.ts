@@ -865,4 +865,132 @@ describe('Sticker Studio V1.7 — Photo Matting & Edge Refinement Core', () => {
     // Detached background clutter completely pruned despite being only 8px from torso
     expect(out[65 * W + 82]).toBe(0);
   });
+
+  it('16. High Quality (MODNet) mode: manual brush edits + project archive save/reopen preserves continuous alpha and decoded RGBA bitwise equality', async () => {
+    const W = 40;
+    const H = 40;
+    const imgData = new ImageData(W, H);
+
+    // Give some distinct colors to the synthetic image
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const idx = (y * W + x) * 4;
+        imgData.data[idx] = (x * 6) % 256;      // R
+        imgData.data[idx + 1] = (y * 6) % 256;  // G
+        imgData.data[idx + 2] = 180;            // B
+        imgData.data[idx + 3] = 255;            // A
+      }
+    }
+
+    const binaryMask = new Uint8Array(W * H);
+    const continuousAlpha = new Uint8Array(W * H);
+
+    // Subject in center [10..30, 10..30]
+    for (let y = 10; y < 30; y++) {
+      for (let x = 10; x < 30; x++) {
+        binaryMask[y * W + x] = 1;
+        // Continuous gradient alpha (simulating hair/translucency in MODNet)
+        continuousAlpha[y * W + x] = Math.min(255, Math.max(1, (x - 10) * 12));
+      }
+    }
+
+    // User brush edits: erase pixel (15, 15) and restore background pixel (5, 5)
+    const delta = new Int8Array(W * H);
+    delta[15 * W + 15] = -1; // Erased
+    delta[5 * W + 5] = 1;    // Restored
+
+    const sourceRgba = new Uint8ClampedArray(imgData.data.buffer, imgData.data.byteOffset, imgData.data.byteLength);
+
+    // 1. Compose before save
+    const composedBefore = composePhotoCutout(binaryMask, sourceRgba, W, H, 10, 60, 0, 0, 0, {
+      precomputedAlphaMatte: continuousAlpha,
+      manualDelta: delta,
+    });
+
+    // Verify erase took effect on continuous alpha
+    expect(composedBefore.alphaMatte).toBeDefined();
+    expect(composedBefore.alphaMatte![15 * W + 15]).toBe(0);
+    // Verify restore took effect
+    expect(composedBefore.alphaMatte![5 * W + 5]).toBe(255);
+    // Verify untouched gradient pixel is preserved intact
+    expect(composedBefore.alphaMatte![20 * W + 20]).toBe((20 - 10) * 12);
+
+    const deltaBytes = new Uint8Array(delta.buffer, delta.byteOffset, delta.byteLength);
+    const deltaBase64 = Buffer.from(deltaBytes).toString('base64');
+    const alphaMatteBase64 = Buffer.from(composedBefore.alphaMatte!).toString('base64');
+    const maskBase64 = Buffer.from(binaryMask).toString('base64');
+
+    // 2. Save project archive with High Quality mode
+    const zipBlob = await saveProjectArchive({
+      name: 'modnet_hq_project_test',
+      sourceImage: imgData,
+      alphaMask: binaryMask,
+      settings: {
+        bgTolerance: 15,
+        edgeSoftness: 1,
+        minComponentArea: 20,
+        groupingProximityThreshold: 35,
+        enableTitleDetection: false,
+      },
+      components: [],
+      groups: [],
+      holes: [],
+      globalBorderThickness: 10,
+      globalSolidBacking: false,
+      globalWhiteBacking: true,
+      projectType: 'photo',
+      photoSettings: {
+        extractionMode: 'high-quality',
+        borderThickness: 10,
+        previewBg: 'checker',
+        hasRemovedBackground: true,
+        manualDelta: deltaBase64,
+        alphaMatteData: alphaMatteBase64,
+        personRegions: [
+          {
+            id: 'person_modnet_1',
+            label: 'P1 (MODNet)',
+            box: { x: 0, y: 0, width: W, height: H },
+            score: 1.0,
+            included: true,
+            isManual: false,
+            maskData: maskBase64,
+          },
+        ],
+      },
+    });
+
+    // 3. Load project archive
+    const file = new File([zipBlob], 'modnet_hq_project_test.stickerstudio');
+    const loaded = await loadProjectArchive(file);
+
+    expect(loaded.metadata.projectType).toBe('photo');
+    expect(loaded.metadata.photoSettings?.extractionMode).toBe('high-quality');
+    expect(loaded.metadata.photoSettings?.alphaMatteData).toBe(alphaMatteBase64);
+    expect(loaded.metadata.photoSettings?.manualDelta).toBe(deltaBase64);
+
+    // 4. Decode restored alpha matte and manual delta
+    const restoredAlphaMatteRaw = Buffer.from(loaded.metadata.photoSettings!.alphaMatteData!, 'base64');
+    const restoredAlphaMatte = new Uint8Array(
+      restoredAlphaMatteRaw.buffer.slice(restoredAlphaMatteRaw.byteOffset, restoredAlphaMatteRaw.byteOffset + restoredAlphaMatteRaw.byteLength)
+    );
+    const restoredDeltaRaw = Buffer.from(loaded.metadata.photoSettings!.manualDelta!, 'base64');
+    const restoredDelta = new Int8Array(
+      restoredDeltaRaw.buffer.slice(restoredDeltaRaw.byteOffset, restoredDeltaRaw.byteOffset + restoredDeltaRaw.byteLength)
+    );
+
+    // 5. Compose after reload
+    const composedAfter = composePhotoCutout(binaryMask, sourceRgba, W, H, 10, 60, 0, 0, 0, {
+      precomputedAlphaMatte: restoredAlphaMatte,
+      manualDelta: restoredDelta,
+    });
+
+    // 6. Verify exact bitwise decoded RGBA equality before save and after reopen
+    expect(composedAfter.artworkOnlyWidth).toBe(composedBefore.artworkOnlyWidth);
+    expect(composedAfter.artworkOnlyHeight).toBe(composedBefore.artworkOnlyHeight);
+    expect(Array.from(composedAfter.artworkOnlyRgba)).toEqual(Array.from(composedBefore.artworkOnlyRgba));
+    expect(Array.from(composedAfter.whiteBackedRgba)).toEqual(Array.from(composedBefore.whiteBackedRgba));
+    expect(composedAfter.alphaMatte).toBeDefined();
+    expect(Array.from(composedAfter.alphaMatte!)).toEqual(Array.from(composedBefore.alphaMatte!));
+  });
 });

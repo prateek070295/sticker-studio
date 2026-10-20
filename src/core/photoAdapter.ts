@@ -191,7 +191,14 @@ export function composePhotoCutout(
     let mattingDurationMs: number | undefined;
 
     if (finishingOptions?.precomputedAlphaMatte && finishingOptions.precomputedAlphaMatte.length === totalPixels) {
-      alphaMask = finishingOptions.precomputedAlphaMatte;
+      alphaMask = new Uint8Array(finishingOptions.precomputedAlphaMatte);
+      if (finishingOptions.manualDelta) {
+        const delta = finishingOptions.manualDelta;
+        for (let i = 0; i < totalPixels; i++) {
+          if (delta[i] === -1) alphaMask[i] = 0;
+          else if (delta[i] === 1) alphaMask[i] = 255;
+        }
+      }
       if (finishingOptions.precomputedDecontaminatedRgb && finishingOptions.precomputedDecontaminatedRgb.length === sourceRgba.length) {
         effectiveRgba = finishingOptions.precomputedDecontaminatedRgb;
       }

@@ -69,10 +69,12 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
     bottomCurveRadius,
     touchesBottomEdge,
     qualityMode,
+    extractionMode,
     decontaminateEdge,
     hairDetail,
     accessoryMerge,
     setQualityMode,
+    setExtractionMode,
     setDecontaminateEdge,
     setHairDetail,
     setAccessoryMerge,
@@ -781,6 +783,61 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
         </div>
 
         <div className="p-4 space-y-6 flex-1">
+          {/* Extraction Mode: Standard vs High Quality */}
+          <div className="space-y-2 p-3 bg-neutral-50 rounded-xl border border-neutral-200">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-neutral-700 uppercase tracking-wider">
+                Photo Extraction
+              </span>
+              {extractionMode === 'high-quality' ? (
+                <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-purple-100 text-purple-800">
+                  MODNet Neural
+                </span>
+              ) : (
+                <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-sky-100 text-sky-800">
+                  MediaPipe
+                </span>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-1 p-1 bg-neutral-100 rounded-xl border border-neutral-200">
+              <button
+                onClick={() => setExtractionMode('standard')}
+                className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                  extractionMode === 'standard'
+                    ? 'bg-white shadow-xs text-neutral-900 font-semibold'
+                    : 'text-neutral-600 hover:text-neutral-900'
+                }`}
+                title="Standard MediaPipe extraction for individuals & groups"
+              >
+                Standard
+              </button>
+              <button
+                onClick={() => setExtractionMode('high-quality')}
+                className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                  extractionMode === 'high-quality'
+                    ? 'bg-white shadow-xs text-purple-700 font-semibold'
+                    : 'text-neutral-600 hover:text-neutral-900'
+                }`}
+                title="On-device MODNet portrait matting with continuous alpha"
+              >
+                High Quality
+              </button>
+            </div>
+            {personRegions.length > 1 ? (
+              <div className="p-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[11px] leading-tight font-medium">
+                ⚠️ High Quality is optimized for single-person portraits. Multi-person photos default to Standard to protect all members.
+              </div>
+            ) : extractionMode === 'high-quality' ? (
+              <p className="text-[11px] text-neutral-500 leading-tight">
+                Continuous alpha portrait matting for natural hair strands and clean edges.
+              </p>
+            ) : (
+              <p className="text-[11px] text-neutral-500 leading-tight">
+                Fast MediaPipe detector-guided segmentation. Supports multi-person groups.
+              </p>
+            )}
+          </div>
+
           {/* 1. Main Action: Detect People (Detector-Guided Pipeline) */}
           <div>
             <button
@@ -796,7 +853,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
               <span>{mask ? 'Re-detect People' : 'Detect People'}</span>
             </button>
             <div className="mt-2 flex items-center justify-between text-[11px] text-neutral-400">
-              <span>EfficientDet-Lite0 + Selfie Crop</span>
+              <span>{extractionMode === 'high-quality' ? 'MODNet On-Device Matting' : 'EfficientDet-Lite0 + Selfie Crop'}</span>
               <span className="inline-flex items-center gap-1 text-emerald-600 font-medium">
                 <CheckCircle2 className="w-3 h-3" /> Offline Ready
               </span>
