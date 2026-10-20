@@ -728,41 +728,86 @@ describe('Sticker Studio V1.7 — Photo Matting & Edge Refinement Core', () => {
   });
 
   it('14. Independently prunes detached false-foreground vegetation while preserving primary subject', () => {
-    const rawMaskPath = path.resolve('docs/v1.7_matting_investigation/real_priors/leather_jacket_portrait_mask.raw');
-    if (!fs.existsSync(rawMaskPath)) return;
+    // 1. Self-contained synthetic regression fixture (committed with test, runs unconditionally)
+    const synW = 300;
+    const synH = 400;
+    const synMask = new Uint8Array(synW * synH);
 
-    const W = 493;
-    const H = 740;
-    const rawMask = fs.readFileSync(rawMaskPath);
-    expect(rawMask.length).toBe(W * H);
+    // Primary subject: torso and head in center [100..200, 50..350] (30,000 pixels)
+    for (let y = 50; y < 350; y++) {
+      for (let x = 100; x < 200; x++) {
+        synMask[y * synW + x] = 1;
+      }
+    }
 
-    // Core bounding box of the portrait
-    const coreBox: BoundingBox = { x: 0, y: 119, width: 493, height: 621 };
+    // False foreground vegetation: detached component touching left border [0..30, 80..160] (2,400 pixels)
+    // Touching image border far from head center
+    for (let y = 80; y < 160; y++) {
+      for (let x = 0; x < 30; x++) {
+        synMask[y * synW + x] = 1;
+      }
+    }
 
-    const merged = mergeAttachedAccessories(rawMask, W, H, coreBox, {
+    const synCoreBox: BoundingBox = { x: 90, y: 50, width: 120, height: 300 };
+    const synMerged = mergeAttachedAccessories(synMask, synW, synH, synCoreBox, {
       headZoneRatio: 0.65,
       maxAttachmentDistance: 16,
     });
 
-    // Count remaining pixels in the bush region (x in [0..84], y in [218..296])
-    let bushPixelsRemaining = 0;
-    for (let y = 218; y <= 296; y++) {
-      for (let x = 0; x <= 84; x++) {
-        if (merged.mask[y * W + x] > 0) {
-          bushPixelsRemaining++;
-        }
+    // Verify all synthetic vegetation pixels are completely pruned
+    let synVegRemaining = 0;
+    for (let y = 80; y < 160; y++) {
+      for (let x = 0; x < 30; x++) {
+        if (synMerged.mask[y * synW + x] > 0) synVegRemaining++;
       }
     }
+    expect(synVegRemaining).toBe(0);
 
-    // Must be completely pruned (0 pixels)
-    expect(bushPixelsRemaining).toBe(0);
-
-    // Primary subject pixels (woman) must be fully retained (>200,000 pixels)
-    let womanPixels = 0;
-    for (let i = 0; i < merged.mask.length; i++) {
-      if (merged.mask[i] > 0) womanPixels++;
+    // Verify primary subject is 100% retained
+    let synPrimaryRetained = 0;
+    for (let y = 50; y < 350; y++) {
+      for (let x = 100; x < 200; x++) {
+        if (synMerged.mask[y * synW + x] > 0) synPrimaryRetained++;
+      }
     }
-    expect(womanPixels).toBeGreaterThan(200000);
+    expect(synPrimaryRetained).toBe(100 * 300);
+
+    // 2. Real-photo acceptance check when local raw-mask fixture is present
+    const rawMaskPath = path.resolve('docs/v1.7_matting_investigation/real_priors/leather_jacket_portrait_mask.raw');
+    if (fs.existsSync(rawMaskPath)) {
+      const W = 493;
+      const H = 740;
+      const rawMask = fs.readFileSync(rawMaskPath);
+      expect(rawMask.length).toBe(W * H);
+
+      // Core bounding box of the portrait
+      const coreBox: BoundingBox = { x: 0, y: 119, width: 493, height: 621 };
+
+      const merged = mergeAttachedAccessories(rawMask, W, H, coreBox, {
+        headZoneRatio: 0.65,
+        maxAttachmentDistance: 16,
+      });
+
+      // Count remaining pixels in the bush region (x in [0..84], y in [218..296])
+      let bushPixelsRemaining = 0;
+      for (let y = 218; y <= 296; y++) {
+        for (let x = 0; x <= 84; x++) {
+          if (merged.mask[y * W + x] > 0) {
+            bushPixelsRemaining++;
+          }
+        }
+      }
+
+      // Must be completely pruned (0 pixels)
+      expect(bushPixelsRemaining).toBe(0);
+
+      // Primary subject pixels (woman) must be fully retained (>200,000 pixels)
+      let womanPixels = 0;
+      for (let i = 0; i < merged.mask.length; i++) {
+        if (merged.mask[i] > 0) womanPixels++;
+      }
+      expect(womanPixels).toBeGreaterThan(200000);
+    }
   });
 
   it('15. Preserves small selected child and head accessory while rejecting detached background objects', () => {
