@@ -1,3 +1,5 @@
+import path from 'path';
+import fs from 'fs';
 import { describe, it, expect } from 'vitest';
 import {
   generateTrimap,
@@ -650,6 +652,26 @@ describe('Sticker Studio V1.7 — Photo Matting & Edge Refinement Core', () => {
     // Verify precomputed alpha matte decoded equality
     const restoredAlpha = Buffer.from(loaded.metadata.photoSettings!.alphaMatteData!, 'base64');
     expect(Array.from(restoredAlpha)).toEqual(Array.from(resolvedAlpha));
+
+    // Verify exact bitwise decoded RGBA equality before save and after reopen
+    const sourceRgba = new Uint8ClampedArray(imgData.data.buffer, imgData.data.byteOffset, imgData.data.byteLength);
+    const composedBefore = composePhotoCutout(alphaMask, sourceRgba, W, H, 20, 60, 0, 0, 0, {
+      qualityMode: 'best',
+      precomputedAlphaMatte: resolvedAlpha,
+    });
+
+    const restoredAlphaMatte = new Uint8Array(
+      restoredAlpha.buffer.slice(restoredAlpha.byteOffset, restoredAlpha.byteOffset + restoredAlpha.byteLength)
+    );
+    const composedAfter = composePhotoCutout(alphaMask, sourceRgba, W, H, 20, 60, 0, 0, 0, {
+      qualityMode: 'best',
+      precomputedAlphaMatte: restoredAlphaMatte,
+    });
+
+    expect(composedAfter.artworkOnlyWidth).toBe(composedBefore.artworkOnlyWidth);
+    expect(composedAfter.artworkOnlyHeight).toBe(composedBefore.artworkOnlyHeight);
+    expect(Array.from(composedAfter.artworkOnlyRgba)).toEqual(Array.from(composedBefore.artworkOnlyRgba));
+    expect(Array.from(composedAfter.whiteBackedRgba)).toEqual(Array.from(composedBefore.whiteBackedRgba));
   });
 
   it('13. Erase/Restore manual brush delta preserves exact user overrides across save/reload', async () => {
@@ -703,5 +725,99 @@ describe('Sticker Studio V1.7 — Photo Matting & Edge Refinement Core', () => {
       loadedDeltaBytes.buffer.slice(loadedDeltaBytes.byteOffset, loadedDeltaBytes.byteOffset + loadedDeltaBytes.byteLength)
     );
     expect(Array.from(loadedDelta)).toEqual(Array.from(delta));
+  });
+
+  it('14. Independently prunes detached false-foreground vegetation while preserving primary subject', () => {
+    const rawMaskPath = path.resolve('docs/v1.7_matting_investigation/real_priors/leather_jacket_portrait_mask.raw');
+    if (!fs.existsSync(rawMaskPath)) return;
+
+    const W = 493;
+    const H = 740;
+    const rawMask = fs.readFileSync(rawMaskPath);
+    expect(rawMask.length).toBe(W * H);
+
+    // Core bounding box of the portrait
+    const coreBox: BoundingBox = { x: 0, y: 119, width: 493, height: 621 };
+
+    const merged = mergeAttachedAccessories(rawMask, W, H, coreBox, {
+      headZoneRatio: 0.65,
+      maxAttachmentDistance: 16,
+    });
+
+    // Count remaining pixels in the bush region (x in [0..84], y in [218..296])
+    let bushPixelsRemaining = 0;
+    for (let y = 218; y <= 296; y++) {
+      for (let x = 0; x <= 84; x++) {
+        if (merged.mask[y * W + x] > 0) {
+          bushPixelsRemaining++;
+        }
+      }
+    }
+
+    // Must be completely pruned (0 pixels)
+    expect(bushPixelsRemaining).toBe(0);
+
+    // Primary subject pixels (woman) must be fully retained (>200,000 pixels)
+    let womanPixels = 0;
+    for (let i = 0; i < merged.mask.length; i++) {
+      if (merged.mask[i] > 0) womanPixels++;
+    }
+    expect(womanPixels).toBeGreaterThan(200000);
+  });
+
+  it('15. Preserves small selected child and head accessory while rejecting detached background objects', () => {
+    const W = 100;
+    const H = 100;
+    const mask = new Uint8Array(W * H);
+
+    // 1. Adult: x in [30..70], y in [20..80]
+    for (let y = 20; y < 80; y++) {
+      for (let x = 30; x < 70; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    // 2. Child: x in [5..20], y in [50..80] (area ~ 450 px, only ~18% of adult)
+    for (let y = 50; y < 80; y++) {
+      for (let x = 5; x < 20; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    // 3. Hair flower touching adult crown: x in [35..45], y in [12..18]
+    for (let y = 12; y < 18; y++) {
+      for (let x = 35; x < 45; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    // 4. Detached background object near lower body/ground (distance 8px from adult torso, but outside head zone): x in [78..90], y in [60..75]
+    for (let y = 60; y < 75; y++) {
+      for (let x = 78; x < 90; x++) {
+        mask[y * W + x] = 1;
+      }
+    }
+
+    const adultBox: BoundingBox = { x: 30, y: 20, width: 40, height: 60 };
+    const childBox: BoundingBox = { x: 5, y: 50, width: 15, height: 30 };
+
+    const merged = mergeAttachedAccessories(mask, W, H, adultBox, {
+      protectedBoxes: [adultBox, childBox],
+      maxAttachmentDistance: 16,
+    });
+
+    const out = merged.mask;
+
+    // Adult retained
+    expect(out[50 * W + 50]).toBe(1);
+
+    // Small child retained
+    expect(out[65 * W + 12]).toBe(1);
+
+    // Hair flower retained
+    expect(out[15 * W + 40]).toBe(1);
+
+    // Detached background clutter completely pruned despite being only 8px from torso
+    expect(out[65 * W + 82]).toBe(0);
   });
 });

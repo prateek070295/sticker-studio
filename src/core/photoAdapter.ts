@@ -180,9 +180,7 @@ export function composePhotoCutout(
         protectedBoxes: finishingOptions.protectedBoxes,
         confidenceMap: finishingOptions.confidenceMap,
       });
-      if (merged.attachedCount > 0) {
-        effectiveMask = merged.mask;
-      }
+      effectiveMask = merged.mask;
     }
 
     // 3. Resolve Alpha Matte & Color Decontamination

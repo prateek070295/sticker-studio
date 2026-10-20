@@ -142,64 +142,64 @@ export function mergeAttachedAccessories(
     ? options.protectedBoxes
     : [coreBox];
 
-  function overlapsBox(c: ComponentInfo, b: BoundingBox): boolean {
-    return !(
-      c.maxX < b.x ||
-      b.x + b.width < c.minX ||
-      c.maxY < b.y ||
-      b.y + b.height < c.minY
-    );
-  }
+  // For each protected box, identify its dominant person component
+  // (the component having the largest number of pixels inside that protected box)
+  for (const box of protectedBoxes) {
+    const bMinX = Math.max(0, box.x);
+    const bMaxX = Math.min(width - 1, box.x + box.width);
+    const bMinY = Math.max(0, box.y);
+    const bMaxY = Math.min(height - 1, box.y + box.height);
 
-  // Find dominant component for coreBox
-  const cMinX = Math.max(0, coreBox.x);
-  const cMaxX = Math.min(width - 1, coreBox.x + coreBox.width);
-  const cMinY = Math.max(0, coreBox.y);
-  const cMaxY = Math.min(height - 1, coreBox.y + coreBox.height);
+    let bestCompIdx = -1;
+    let maxOverlap = 0;
 
-  let primaryCompIdx = -1;
-  let maxCoreOverlapPixels = 0;
-
-  for (let i = 0; i < components.length; i++) {
-    const comp = components[i];
-    let overlapInCore = 0;
-    for (const idx of comp.pixels) {
-      const px = idx % width;
-      const py = Math.floor(idx / width);
-      if (px >= cMinX && px <= cMaxX && py >= cMinY && py <= cMaxY) {
-        overlapInCore++;
+    for (let i = 0; i < components.length; i++) {
+      const comp = components[i];
+      let overlap = 0;
+      for (const idx of comp.pixels) {
+        const px = idx % width;
+        const py = Math.floor(idx / width);
+        if (px >= bMinX && px <= bMaxX && py >= bMinY && py <= bMaxY) {
+          overlap++;
+        }
+      }
+      if (overlap > maxOverlap) {
+        maxOverlap = overlap;
+        bestCompIdx = i;
       }
     }
 
-    if (overlapInCore > maxCoreOverlapPixels) {
-      maxCoreOverlapPixels = overlapInCore;
-      primaryCompIdx = i;
+    if (bestCompIdx !== -1 && maxOverlap >= 15) {
+      components[bestCompIdx].isPrimary = true;
+      // Also protect secondary body parts of the same person if they have substantial mass in the box
+      for (let i = 0; i < components.length; i++) {
+        if (i === bestCompIdx) continue;
+        const comp = components[i];
+        let overlap = 0;
+        for (const idx of comp.pixels) {
+          const px = idx % width;
+          const py = Math.floor(idx / width);
+          if (px >= bMinX && px <= bMaxX && py >= bMinY && py <= bMaxY) {
+            overlap++;
+          }
+        }
+        // Substantial body piece (> 35% of its own pixels are inside the box AND > 20% of maxOverlap)
+        if (overlap >= comp.pixelCount * 0.35 && overlap >= maxOverlap * 0.20) {
+          comp.isPrimary = true;
+        }
+      }
     }
   }
 
-  // Fallback: if no component had pixels in coreBox, pick largest component overall
-  if (primaryCompIdx === -1) {
+  // Safety fallback: if no component was selected as primary (e.g. empty boxes), select largest component overall
+  if (!components.some(c => c.isPrimary)) {
     let maxIdx = 0;
     for (let i = 1; i < components.length; i++) {
       if (components[i].pixelCount > components[maxIdx].pixelCount) {
         maxIdx = i;
       }
     }
-    primaryCompIdx = maxIdx;
-  }
-
-  const mainPixelCount = components[primaryCompIdx].pixelCount;
-
-  // Mark all components overlapping ANY protected box as primary
-  // Also preserve dominant component and massive components (>45% of dominant)
-  for (let i = 0; i < components.length; i++) {
-    const comp = components[i];
-    const isDominant = (i === primaryCompIdx || comp.pixelCount > mainPixelCount * 0.45);
-    const overlapsAnyProtected = protectedBoxes.some(box => overlapsBox(comp, box));
-
-    if (isDominant || overlapsAnyProtected) {
-      comp.isPrimary = true;
-    }
+    components[maxIdx].isPrimary = true;
   }
 
   // Build binary primary mask to calculate Euclidean distance to primary
@@ -215,11 +215,36 @@ export function mergeAttachedAccessories(
   // Distance to all primary person pixels
   const distToPrimary = computeEuclideanDistanceTransform(primaryMask, width, height);
 
-  // Compute head zone thresholds for each protected person box
-  const personHeadZones = protectedBoxes.map(b => ({
-    minY: Math.max(0, b.y - 10),
-    maxY: b.y + b.height * headZoneRatio,
-  }));
+  // Build binary head mask: only primary pixels located in the upper head/hair zone
+  const primaryHeadMask = new Uint8Array(size);
+  const effectiveHeadRatio = Math.min(0.50, headZoneRatio);
+  for (const comp of components) {
+    if (comp.isPrimary) {
+      for (const idx of comp.pixels) {
+        const py = Math.floor(idx / width);
+        const inAnyHead = protectedBoxes.some(b => py <= b.y + b.height * effectiveHeadRatio);
+        if (inAnyHead) {
+          primaryHeadMask[idx] = 1;
+        }
+      }
+    }
+  }
+
+  // Distance to primary head/hair pixels (accessories attach to head/hair, not torso/hips)
+  const distToHead = computeEuclideanDistanceTransform(primaryHeadMask, width, height);
+
+  // Compute 2D head zones for each protected person box
+  // Head is centered horizontally in the upper torso/body box (central ~70% width)
+  const personHeadZones = protectedBoxes.map(b => {
+    const headCenterX = b.x + b.width * 0.5;
+    const halfHeadWidth = b.width * 0.35;
+    return {
+      minX: Math.max(0, headCenterX - halfHeadWidth - maxDist),
+      maxX: Math.min(width - 1, headCenterX + halfHeadWidth + maxDist),
+      minY: Math.max(0, b.y - maxDist),
+      maxY: b.y + b.height * effectiveHeadRatio,
+    };
+  });
 
   // 3. Evaluate non-primary candidate components
   const outMask = new Uint8Array(size);
@@ -234,16 +259,31 @@ export function mergeAttachedAccessories(
     // Reject components that are too small or excessively large
     if (comp.pixelCount < minPixels || comp.pixelCount > maxPixels) continue;
 
-    // Check if component falls within the head zone of ANY protected person
+    // Check if component falls within the 2D head zone of ANY protected person
     const isNearAnyHead = personHeadZones.some(hz => {
-      return (comp.minY <= hz.maxY && comp.maxY >= hz.minY);
+      return (
+        comp.minY <= hz.maxY &&
+        comp.maxY >= hz.minY &&
+        comp.minX <= hz.maxX &&
+        comp.maxX >= hz.minX
+      );
     });
     if (!isNearAnyHead) continue;
 
-    // Find minimum distance of this component to any primary person pixel
+    // Reject false foreground objects that cling to image borders far from head center
+    // e.g. detached edge vegetation or framing
+    const isEdgeClutter = personHeadZones.some(hz => {
+      const headCenterX = (hz.minX + hz.maxX) * 0.5;
+      const compCenterX = (comp.minX + comp.maxX) * 0.5;
+      const isTouchingBorder = comp.minX === 0 || comp.maxX === width - 1;
+      return isTouchingBorder && Math.abs(compCenterX - headCenterX) > (hz.maxX - hz.minX) * 0.35;
+    });
+    if (isEdgeClutter) continue;
+
+    // Find minimum distance of this component to any primary HEAD pixel
     let minDist = Infinity;
     for (const idx of comp.pixels) {
-      const d = distToPrimary[idx];
+      const d = distToHead[idx];
       if (d < minDist) {
         minDist = d;
       }
