@@ -6,6 +6,9 @@ export default defineConfig({
   esbuild: {
     jsx: 'automatic',
   },
+  resolve: {
+    conditions: ['onnxruntime-web-use-extern-wasm'],
+  },
   server: {
     port: 5173,
     host: true,
