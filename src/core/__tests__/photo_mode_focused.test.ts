@@ -1,9 +1,52 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import React, { act } from 'react';
+import { createRoot, Root } from 'react-dom/client';
 import { composePhotoCutout } from '../photoAdapter';
 import { applyBrushStroke } from '../maskPatch';
-import { saveProjectArchive, loadProjectArchive, ProjectSaveState } from '../projectArchive';
+import { saveProjectArchive, loadProjectArchive, ProjectSaveState, LoadedProjectData } from '../projectArchive';
 import { ArtworkComponent, StickerGroup, ExtractionSettings } from '../../types';
+import { usePhotoMode, UsePhotoModeReturn } from '../../state/usePhotoMode';
 import JSZip from 'jszip';
+
+let modnetDeferredPromise: Promise<any> | null = null;
+let mockDetectedPeople: any[] = [
+  {
+    id: 'p1',
+    label: 'P1',
+    box: { x: 0, y: 0, width: 100, height: 100 },
+    score: 0.99,
+    isManual: false,
+    included: true,
+  },
+];
+
+vi.mock('../modnetSegmenter', () => ({
+  segmentPortraitModnet: vi.fn((_img: any, onProgress?: (msg: string) => void) => {
+    onProgress?.('Running on-device High-Quality portrait matting (MODNet)...');
+    if (modnetDeferredPromise) {
+      return modnetDeferredPromise;
+    }
+    return Promise.resolve({
+      alphaMatte: new Uint8Array(100 * 100),
+      binaryMask: new Uint8Array(100 * 100),
+      bounds: { x: 0, y: 0, width: 100, height: 100 },
+    });
+  }),
+  getModnetPipeline: vi.fn().mockResolvedValue({}),
+}));
+
+vi.mock('../mediaPipeSegmenter', async (importOriginal) => {
+  const actual: any = await importOriginal();
+  return {
+    ...actual,
+    getMediaPipeSegmenter: vi.fn().mockResolvedValue({}),
+    getMediaPipeDetector: vi.fn().mockResolvedValue({}),
+    detectPeopleInPhoto: vi.fn((_img: any, _ratio: any, onProgress?: (msg: string) => void) => {
+      onProgress?.('Scanning photo for people...');
+      return Promise.resolve(mockDetectedPeople);
+    }),
+  };
+});
 
 describe('Sticker Studio Photo Mode — Focused Automated Test Suite', () => {
   const W = 80;
@@ -391,5 +434,384 @@ describe('Sticker Studio Photo Mode — Focused Automated Test Suite', () => {
     await expect(loadProjectArchive(corruptBlobD)).rejects.toThrow(
       /Security violation.*path traversal/
     );
+  });
+
+  // 8. In-Flight Operation Safety & Cancellation (Photo Import, Project Load, Reset)
+  describe('8. In-Flight Extraction Safety & State Invalidation', () => {
+    let root: Root | null = null;
+    let hookResult: UsePhotoModeReturn;
+
+    function TestHookComponent() {
+      hookResult = usePhotoMode();
+      return null;
+    }
+
+    function setupMockDom() {
+      (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+      (globalThis as any).window = globalThis;
+
+      class MockElement {
+        nodeType = 1;
+        tagName: string;
+        style = {};
+        childNodes: any[] = [];
+        width = 100;
+        height = 100;
+        ownerDocument: any = null;
+        constructor(tag?: string) {
+          this.tagName = (tag || 'DIV').toUpperCase();
+        }
+        setAttribute() {}
+        getAttribute() { return null; }
+        removeAttribute() {}
+        addEventListener() {}
+        removeEventListener() {}
+        appendChild(c: any) { this.childNodes.push(c); return c; }
+        removeChild(c: any) { return c; }
+        insertBefore(c: any) { return c; }
+        getContext(_type: string) {
+          return {
+            drawImage: () => {},
+            getImageData: (_x: number, _y: number, w: number, h: number) => {
+              return new (globalThis as any).ImageData(w, h);
+            },
+            putImageData: () => {},
+          };
+        }
+      }
+
+      (globalThis as any).Element = MockElement;
+      (globalThis as any).HTMLElement = MockElement;
+      (globalThis as any).HTMLCanvasElement = MockElement;
+      (globalThis as any).HTMLIFrameElement = class HTMLIFrameElement {};
+
+      (globalThis as any).Image = class MockImage {
+        naturalWidth = 100;
+        naturalHeight = 100;
+        onload: (() => void) | null = null;
+        onerror: ((err: any) => void) | null = null;
+        set src(_val: string) {
+          setTimeout(() => {
+            if (this.onload) this.onload();
+          }, 0);
+        }
+      };
+
+      const doc: any = {
+        nodeType: 9,
+        activeElement: null,
+        createElement: (tag: string) => {
+          const el = new MockElement(tag);
+          el.ownerDocument = doc;
+          return el;
+        },
+        createDocumentFragment: () => ({ nodeType: 11, childNodes: [], appendChild: (c: any) => c }),
+        createTextNode: (t: string) => ({ nodeType: 3, textContent: t }),
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      };
+      doc.defaultView = globalThis;
+      (globalThis as any).document = doc;
+
+      const container = new MockElement('div');
+      container.ownerDocument = doc;
+      root = createRoot(container as any);
+
+      act(() => {
+        root!.render(React.createElement(TestHookComponent));
+      });
+    }
+
+    function tearDownMockDom() {
+      if (root) {
+        act(() => {
+          root!.unmount();
+        });
+        root = null;
+      }
+      modnetDeferredPromise = null;
+      delete (globalThis as any).FileReader;
+    }
+
+    it('8a. Safely cancels in-flight High Quality inference when another photo is imported', async () => {
+      setupMockDom();
+      try {
+        await act(async () => {
+          await hookResult.importFromDataUrl('data:image/png;base64,mock1', 'initial_photo.jpg');
+        });
+
+        expect(hookResult.fileName).toBe('initial_photo.jpg');
+
+        let resolveModnet: (val: any) => void = () => {};
+        modnetDeferredPromise = new Promise((resolve) => {
+          resolveModnet = resolve;
+        });
+
+        let detectPromise: Promise<void> = null as any;
+        act(() => {
+          detectPromise = hookResult.detectPeople('high-quality');
+        });
+
+        // Microtasks tick to transition from person detection to MODNet matting
+        await act(async () => {
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
+        expect(hookResult.isProcessing).toBe(true);
+        expect(hookResult.progressMessage).toContain('High-Quality');
+
+        // While High Quality inference is in-flight, import second photo
+        await act(async () => {
+          await hookResult.importFromDataUrl('data:image/png;base64,mock2', 'second_photo.png');
+        });
+
+        // Interface must not remain stuck on "Processing"
+        expect(hookResult.isProcessing).toBe(false);
+        expect(hookResult.progressMessage).toBe('');
+        expect(hookResult.fileName).toBe('second_photo.png');
+        expect(hookResult.mask).toBeNull();
+
+        // Stale MODNet completes later
+        await act(async () => {
+          resolveModnet({
+            alphaMatte: new Uint8Array(100 * 100).fill(255),
+            binaryMask: new Uint8Array(100 * 100).fill(1),
+            bounds: { x: 0, y: 0, width: 100, height: 100 },
+          });
+          await detectPromise;
+        });
+
+        // Ensure stale result cannot overwrite the newly imported photo
+        expect(hookResult.fileName).toBe('second_photo.png');
+        expect(hookResult.mask).toBeNull();
+        expect(hookResult.isProcessing).toBe(false);
+      } finally {
+        tearDownMockDom();
+      }
+    });
+
+    it('8b. Safely cancels in-flight High Quality inference when a saved project is loaded', async () => {
+      setupMockDom();
+      try {
+        await act(async () => {
+          await hookResult.importFromDataUrl('data:image/png;base64,mock1', 'initial.jpg');
+        });
+
+        let resolveModnet: (val: any) => void = () => {};
+        modnetDeferredPromise = new Promise((resolve) => {
+          resolveModnet = resolve;
+        });
+
+        let detectPromise: Promise<void> = null as any;
+        act(() => {
+          detectPromise = hookResult.detectPeople('high-quality');
+        });
+
+        await act(async () => {
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
+        expect(hookResult.isProcessing).toBe(true);
+
+        const projectSource = new (globalThis as any).ImageData(100, 100);
+        const projectAlpha = new Uint8Array(100 * 100).fill(255);
+        const mockLoadedProject: LoadedProjectData = {
+          metadata: {
+            version: '1.1',
+            schemaVersion: 2,
+            name: 'my_saved_portrait',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            sourceSha256: 'mocksha',
+            imageDimensions: { width: 100, height: 100 },
+            projectType: 'photo',
+            settings: {} as any,
+            globalBorderThickness: 25,
+            globalSolidBacking: false,
+            globalWhiteBacking: true,
+            photoSettings: {
+              borderThickness: 25,
+              previewBg: 'checker',
+              hasRemovedBackground: true,
+              extractionMode: 'high-quality',
+              viewMode: 'sticker',
+              isReviewMode: true,
+            },
+          },
+          sourceImage: projectSource,
+          alphaMask: projectAlpha,
+          labelMap: new Uint16Array(100 * 100),
+          components: [],
+          groups: [],
+          holes: [],
+        };
+
+        // Load project while inference is in-flight
+        act(() => {
+          hookResult.loadPhotoProject(mockLoadedProject);
+        });
+
+        expect(hookResult.isProcessing).toBe(false);
+        expect(hookResult.progressMessage).toBe('');
+        expect(hookResult.fileName).toBe('my_saved_portrait.png');
+        expect(hookResult.mask![0]).toBe(1);
+
+        // Stale inference resolves with binary 0
+        await act(async () => {
+          resolveModnet({
+            alphaMatte: new Uint8Array(100 * 100).fill(0),
+            binaryMask: new Uint8Array(100 * 100).fill(0),
+            bounds: { x: 0, y: 0, width: 100, height: 100 },
+          });
+          await detectPromise;
+        });
+
+        // Loaded project mask must NOT be overwritten by stale 0s
+        expect(hookResult.fileName).toBe('my_saved_portrait.png');
+        expect(hookResult.mask![0]).toBe(1);
+        expect(hookResult.isProcessing).toBe(false);
+      } finally {
+        tearDownMockDom();
+      }
+    });
+
+    it('8c. Safely cancels in-flight inference when resetPhoto is called', async () => {
+      setupMockDom();
+      try {
+        await act(async () => {
+          await hookResult.importFromDataUrl('data:image/png;base64,mock1', 'reset_target.jpg');
+        });
+
+        let resolveModnet: (val: any) => void = () => {};
+        modnetDeferredPromise = new Promise((resolve) => {
+          resolveModnet = resolve;
+        });
+
+        let detectPromise: Promise<void> = null as any;
+        act(() => {
+          detectPromise = hookResult.detectPeople('high-quality');
+        });
+
+        await act(async () => {
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
+        expect(hookResult.isProcessing).toBe(true);
+
+        act(() => {
+          hookResult.resetPhoto();
+        });
+
+        expect(hookResult.isProcessing).toBe(false);
+        expect(hookResult.progressMessage).toBe('');
+        expect(hookResult.sourceImage).toBeNull();
+        expect(hookResult.mask).toBeNull();
+
+        await act(async () => {
+          resolveModnet({
+            alphaMatte: new Uint8Array(100 * 100).fill(255),
+            binaryMask: new Uint8Array(100 * 100).fill(1),
+            bounds: { x: 0, y: 0, width: 100, height: 100 },
+          });
+          await detectPromise;
+        });
+
+        expect(hookResult.sourceImage).toBeNull();
+        expect(hookResult.mask).toBeNull();
+        expect(hookResult.isProcessing).toBe(false);
+      } finally {
+        tearDownMockDom();
+      }
+    });
+
+    it('8d. Safely invalidates in-flight FileReader when a saved project loads before FileReader finishes', async () => {
+      setupMockDom();
+      try {
+        let triggerFileReaderLoad: (() => void) | null = null;
+        (globalThis as any).FileReader = class MockFileReader {
+          onload: (() => void) | null = null;
+          onerror: ((err: any) => void) | null = null;
+          result: string | null = null;
+          readAsDataURL() {
+            triggerFileReaderLoad = () => {
+              this.result = 'data:image/png;base64,photoA_data';
+              if (this.onload) this.onload();
+            };
+          }
+        };
+
+        const mockFileA = new File(['dummyA'], 'photoA.jpg', { type: 'image/jpeg' });
+
+        // 1. Import A starts and FileReader remains pending
+        let importAPromise: Promise<void>;
+        act(() => {
+          importAPromise = hookResult.importPhoto(mockFileA);
+        });
+
+        // FileReader is still pending (triggerFileReaderLoad has not been called)
+        expect(triggerFileReaderLoad).not.toBeNull();
+
+        // 2. Project B loads while FileReader A is pending
+        const projectBSource = new (globalThis as any).ImageData(100, 100);
+        projectBSource.data[0] = 42; // Distinct marker
+        const projectBAlpha = new Uint8Array(100 * 100).fill(255);
+        const mockLoadedProjectB: LoadedProjectData = {
+          metadata: {
+            version: '1.1',
+            schemaVersion: 2,
+            name: 'project_b_saved',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            sourceSha256: 'sha_project_b',
+            imageDimensions: { width: 100, height: 100 },
+            projectType: 'photo',
+            settings: {} as any,
+            globalBorderThickness: 20,
+            globalSolidBacking: false,
+            globalWhiteBacking: true,
+            photoSettings: {
+              borderThickness: 20,
+              previewBg: 'checker',
+              hasRemovedBackground: true,
+              extractionMode: 'standard',
+              viewMode: 'sticker',
+              isReviewMode: true,
+            },
+          },
+          sourceImage: projectBSource,
+          alphaMask: projectBAlpha,
+          labelMap: new Uint16Array(100 * 100),
+          components: [],
+          groups: [],
+          holes: [],
+        };
+
+        act(() => {
+          hookResult.loadPhotoProject(mockLoadedProjectB);
+        });
+
+        // Verify Project B is active
+        expect(hookResult.fileName).toBe('project_b_saved.png');
+        expect(hookResult.sourceImage?.data[0]).toBe(42);
+        expect(hookResult.mask![0]).toBe(1);
+
+        // 3. FileReader A completes
+        await act(async () => {
+          triggerFileReaderLoad!();
+          await importAPromise;
+        });
+
+        // 4. Project B remains intact, with no stale source-image replacement
+        expect(hookResult.fileName).toBe('project_b_saved.png');
+        expect(hookResult.sourceImage?.data[0]).toBe(42);
+        expect(hookResult.mask![0]).toBe(1);
+        expect(hookResult.isProcessing).toBe(false);
+      } finally {
+        tearDownMockDom();
+      }
+    });
   });
 });

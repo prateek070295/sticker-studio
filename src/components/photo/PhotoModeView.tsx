@@ -17,10 +17,12 @@ import {
   EyeOff,
   Trash2,
   RefreshCw,
-  MousePointer
+  MousePointer,
+  RotateCw
 } from 'lucide-react';
 import { UsePhotoModeReturn } from '../../state/usePhotoMode';
 import { BoundingBox } from '../../types';
+import { isModnetCached } from '../../core/modnetSegmenter';
 
 interface PhotoModeViewProps {
   photo: UsePhotoModeReturn;
@@ -53,6 +55,8 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
     setIsReviewMode,
     applyStroke,
     undo,
+    redo,
+    canRedo,
     setBorderThickness,
     setEdgeTrim,
     setSmoothOutline,
@@ -68,6 +72,16 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
     bottomFinish,
     bottomCurveRadius,
     touchesBottomEdge,
+    qualityMode,
+    extractionMode,
+    decontaminateEdge,
+    hairDetail,
+    accessoryMerge,
+    setQualityMode,
+    setExtractionMode,
+    setDecontaminateEdge,
+    setHairDetail,
+    setAccessoryMerge,
     setPreviewBg,
     setViewMode,
     setToolMode,
@@ -104,6 +118,12 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
   const [draftBox, setDraftBox] = useState<{ id: string; box: BoundingBox } | null>(null);
   const draftBoxRef = useRef<{ id: string; box: BoundingBox } | null>(null);
   const boxDragStartRef = useRef<{ mouseX: number; mouseY: number; initialBox: BoundingBox } | null>(null);
+
+  // Check if MODNet weights are cached for offline indicator
+  const [modnetCached, setModnetCached] = useState<boolean>(false);
+  useEffect(() => {
+    isModnetCached().then(setModnetCached).catch(() => setModnetCached(false));
+  }, [extractionMode, isProcessing]);
 
   // Auto-fit image to container on initial load
   useEffect(() => {
@@ -415,7 +435,8 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
 
   const getBgStyle = () => {
     if (previewBg === 'dark') return 'bg-slate-900';
-    if (previewBg === 'light') return 'bg-white';
+    if (previewBg === 'light' || previewBg === 'white') return 'bg-white';
+    if (previewBg === 'grey') return 'bg-neutral-600';
     if (previewBg === 'saturated') return 'bg-cyan-500';
     return 'bg-checker';
   };
@@ -772,25 +793,104 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
         </div>
 
         <div className="p-4 space-y-6 flex-1">
+          {/* Extraction Mode: Standard vs High Quality */}
+          <div className="space-y-2 p-3 bg-neutral-50 rounded-xl border border-neutral-200">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-neutral-700 uppercase tracking-wider">
+                Photo Extraction
+              </span>
+              {extractionMode === 'high-quality' ? (
+                <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-purple-100 text-purple-800">
+                  MODNet Neural
+                </span>
+              ) : (
+                <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-sky-100 text-sky-800">
+                  MediaPipe
+                </span>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-1 p-1 bg-neutral-100 rounded-xl border border-neutral-200">
+              <button
+                onClick={() => setExtractionMode('standard')}
+                disabled={isProcessing}
+                className={`py-1.5 text-xs font-medium rounded-lg transition disabled:opacity-50 ${
+                  extractionMode === 'standard'
+                    ? 'bg-white shadow-xs text-neutral-900 font-semibold'
+                    : 'text-neutral-600 hover:text-neutral-900'
+                }`}
+                title="Standard MediaPipe extraction for individuals & groups"
+              >
+                Standard
+              </button>
+              <button
+                onClick={() => setExtractionMode('high-quality')}
+                disabled={isProcessing}
+                className={`py-1.5 text-xs font-medium rounded-lg transition disabled:opacity-50 ${
+                  extractionMode === 'high-quality'
+                    ? 'bg-white shadow-xs text-purple-700 font-semibold'
+                    : 'text-neutral-600 hover:text-neutral-900'
+                }`}
+                title="On-device MODNet portrait matting with continuous alpha"
+              >
+                High Quality
+              </button>
+            </div>
+            {personRegions.length > 1 ? (
+              <div className="p-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[11px] leading-tight font-medium">
+                ⚠️ High Quality is optimized for single-person portraits. Multi-person photos default to Standard to protect all members.
+              </div>
+            ) : extractionMode === 'high-quality' ? (
+              <p className="text-[11px] text-neutral-500 leading-tight">
+                Continuous alpha portrait matting for natural hair strands and clean edges.
+              </p>
+            ) : (
+              <p className="text-[11px] text-neutral-500 leading-tight">
+                Fast MediaPipe detector-guided segmentation. Supports multi-person groups.
+              </p>
+            )}
+          </div>
+
           {/* 1. Main Action: Detect People (Detector-Guided Pipeline) */}
           <div>
             <button
-              onClick={detectPeople}
+              onClick={() => detectPeople(extractionMode)}
               disabled={isProcessing}
-              className={`w-full py-3 px-4 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 shadow-sm transition ${
+              className={`w-full py-3 px-4 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 shadow-sm transition disabled:opacity-50 ${
                 mask
                   ? 'bg-neutral-100 hover:bg-neutral-200 text-neutral-800 border border-neutral-300'
                   : 'bg-linear-to-r from-sky-500 to-blue-600 hover:from-sky-600 hover:to-blue-700 text-white shadow-md'
               }`}
             >
-              <Users className="w-4 h-4" />
-              <span>{mask ? 'Re-detect People' : 'Detect People'}</span>
+              {isProcessing ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Users className="w-4 h-4" />
+              )}
+              <span>
+                {isProcessing
+                  ? 'Processing...'
+                  : mask
+                  ? (extractionMode === 'high-quality' ? 'Re-extract (High Quality)' : 'Re-detect People')
+                  : (extractionMode === 'high-quality' ? 'Extract High Quality' : 'Detect People')}
+              </span>
             </button>
             <div className="mt-2 flex items-center justify-between text-[11px] text-neutral-400">
-              <span>EfficientDet-Lite0 + Selfie Crop</span>
-              <span className="inline-flex items-center gap-1 text-emerald-600 font-medium">
-                <CheckCircle2 className="w-3 h-3" /> Offline Ready
-              </span>
+              <span>{extractionMode === 'high-quality' ? 'MODNet On-Device Matting' : 'EfficientDet-Lite0 + Selfie Crop'}</span>
+              {extractionMode === 'high-quality' ? (
+                modnetCached ? (
+                  <span className="inline-flex items-center gap-1 text-emerald-600 font-medium">
+                    <CheckCircle2 className="w-3 h-3" /> Offline Ready
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-amber-600 font-medium" title="First run requires on-device model download (~25MB)">
+                    Download Required (~25MB)
+                  </span>
+                )
+              ) : (
+                <span className="inline-flex items-center gap-1 text-emerald-600 font-medium">
+                  <CheckCircle2 className="w-3 h-3" /> Offline Ready
+                </span>
+              )}
             </div>
           </div>
 
@@ -942,10 +1042,18 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                   <button
                     onClick={undo}
                     disabled={!canUndo}
-                    className="p-1 rounded-md text-neutral-500 hover:bg-neutral-200 disabled:opacity-30 transition"
+                    className="p-1 rounded-md text-neutral-500 hover:bg-neutral-200 disabled:opacity-30 transition cursor-pointer"
                     title="Undo (Ctrl+Z)"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={redo}
+                    disabled={!canRedo}
+                    className="p-1 rounded-md text-neutral-500 hover:bg-neutral-200 disabled:opacity-30 transition cursor-pointer"
+                    title="Redo (Ctrl+Y)"
+                  >
+                    <RotateCw className="w-3.5 h-3.5" />
                   </button>
                 </div>
               </div>
@@ -1014,6 +1122,109 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                 <Sparkles className="w-3.5 h-3.5 text-amber-500" />
                 <span>Clean Stray Fragments</span>
               </button>
+            </div>
+          )}
+
+          {/* V1.7 Photographic Matting & Edge Quality */}
+          {mask && (
+            <div className="space-y-3 p-3 bg-neutral-50 rounded-xl border border-neutral-200">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-neutral-700 uppercase tracking-wider">
+                  Matting Quality
+                </span>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                  extractionMode === 'high-quality' ? 'bg-purple-100 text-purple-800' : 'bg-sky-100 text-sky-800'
+                }`}>
+                  {extractionMode === 'high-quality' ? 'High Quality (MODNet Active)' : qualityMode === 'fast' ? 'Fast (V1.6)' : qualityMode === 'better' ? 'Guided Matte' : 'Studio Matting'}
+                </span>
+              </div>
+
+              {extractionMode === 'high-quality' ? (
+                <div className="p-2.5 rounded-lg bg-purple-50/70 border border-purple-200 text-purple-900 text-[11px] leading-relaxed">
+                  <p className="font-semibold mb-0.5">On-Device Neural Matting Active</p>
+                  <p className="text-purple-700">Continuous alpha hair wisps and edge detail are produced directly by MODNet. Guided filter adjustments below are active in Standard mode.</p>
+                </div>
+              ) : (
+                <>
+                  {/* Quality Mode Segmented Buttons */}
+                  <div className="grid grid-cols-3 gap-1 p-1 bg-neutral-100 rounded-xl border border-neutral-200">
+                    <button
+                      onClick={() => setQualityMode('fast')}
+                      className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                        qualityMode === 'fast' ? 'bg-white shadow-xs text-neutral-900 font-semibold' : 'text-neutral-600 hover:text-neutral-900'
+                      }`}
+                      title="Fast baseline segmentation (V1.6)"
+                    >
+                      Fast
+                    </button>
+                    <button
+                      onClick={() => setQualityMode('better')}
+                      className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                        qualityMode === 'better' ? 'bg-white shadow-xs text-neutral-900 font-semibold' : 'text-neutral-600 hover:text-neutral-900'
+                      }`}
+                      title="Continuous guided subpixel matting"
+                    >
+                      Better
+                    </button>
+                    <button
+                      onClick={() => setQualityMode('best')}
+                      className={`py-1.5 text-xs font-medium rounded-lg transition ${
+                        qualityMode === 'best' ? 'bg-white shadow-xs text-neutral-900 font-semibold' : 'text-neutral-600 hover:text-neutral-900'
+                      }`}
+                      title="Guided matting with color decontamination"
+                    >
+                      Best
+                    </button>
+                  </div>
+
+                  {/* Hair & Fine Detail Sensitivity Slider */}
+                  {qualityMode !== 'fast' && (
+                    <div className="space-y-1 pt-1">
+                      <div className="flex justify-between text-xs text-neutral-600">
+                        <span>Hair & Edge Detail</span>
+                        <span className="font-mono">{hairDetail}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="1"
+                        max="10"
+                        value={hairDetail}
+                        onChange={(e) => setHairDetail(Number(e.target.value))}
+                        className="w-full accent-sky-500 h-1.5 bg-neutral-200 rounded-lg cursor-pointer"
+                      />
+                      <div className="flex justify-between text-[10px] text-neutral-400">
+                        <span>Subtle</span>
+                        <span className="text-sky-600 font-semibold">Standard (5)</span>
+                        <span>Max Hair Wisps</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Color Decontamination Checkbox */}
+                  {qualityMode !== 'fast' && (
+                    <label className="flex items-center gap-2 text-xs text-neutral-700 cursor-pointer pt-1">
+                      <input
+                        type="checkbox"
+                        checked={decontaminateEdge}
+                        onChange={(e) => setDecontaminateEdge(e.target.checked)}
+                        className="rounded text-sky-600 focus:ring-sky-500 cursor-pointer"
+                      />
+                      <span>Decontaminate background color halos</span>
+                    </label>
+                  )}
+
+                  {/* Attached Accessories Merge Checkbox */}
+                  <label className="flex items-center gap-2 text-xs text-neutral-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={accessoryMerge}
+                      onChange={(e) => setAccessoryMerge(e.target.checked)}
+                      className="rounded text-sky-600 focus:ring-sky-500 cursor-pointer"
+                    />
+                    <span>Preserve hair flowers & attached accessories</span>
+                  </label>
+                </>
+              )}
             </div>
           )}
 
@@ -1217,7 +1428,7 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
             <span className="text-xs font-bold text-neutral-700 uppercase tracking-wider">
               Preview Background
             </span>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-3 gap-1.5">
               <button
                 onClick={() => setPreviewBg('checker')}
                 className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${
@@ -1237,6 +1448,15 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
                 <span>Light</span>
               </button>
               <button
+                onClick={() => setPreviewBg('white')}
+                className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${
+                  previewBg === 'white' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
+                }`}
+              >
+                <div className="w-4 h-4 rounded-full border border-neutral-300 bg-white shadow-inner" />
+                <span>White</span>
+              </button>
+              <button
                 onClick={() => setPreviewBg('dark')}
                 className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${
                   previewBg === 'dark' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
@@ -1244,6 +1464,15 @@ export const PhotoModeView: React.FC<PhotoModeViewProps> = ({ photo }) => {
               >
                 <div className="w-4 h-4 rounded-full border border-neutral-700 bg-slate-900" />
                 <span>Dark</span>
+              </button>
+              <button
+                onClick={() => setPreviewBg('grey')}
+                className={`py-2 rounded-lg border text-xs font-medium flex flex-col items-center gap-1 transition ${
+                  previewBg === 'grey' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
+                }`}
+              >
+                <div className="w-4 h-4 rounded-full border border-neutral-400 bg-neutral-500" />
+                <span>Grey</span>
               </button>
               <button
                 onClick={() => setPreviewBg('saturated')}

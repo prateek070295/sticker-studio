@@ -94,6 +94,7 @@ export interface PersonRegion {
   isUncertain?: boolean;
   cropBounds?: BoundingBox;
   cropMask?: Uint8Array; // Binary mask (cropBounds.width * cropBounds.height)
+  cropConfidence?: Float32Array; // Continuous model probabilities 0.0 .. 1.0
 }
 
 export interface SerializedPersonRegion {
@@ -106,6 +107,7 @@ export interface SerializedPersonRegion {
   isUncertain?: boolean;
   cropBounds?: BoundingBox;
   maskData?: string; // Base64 RLE or mask identifier
+  confidenceData?: string; // Base64 raw Float32Array bytes
 }
 export type ToolMode =
   | 'select'
@@ -225,7 +227,7 @@ export interface ProjectMetadata {
   gridConfig?: GridSheetConfig;
   photoSettings?: {
     borderThickness: number;
-    previewBg: 'checker' | 'dark' | 'light' | 'saturated';
+    previewBg: 'checker' | 'dark' | 'light' | 'saturated' | 'white' | 'grey';
     hasRemovedBackground: boolean;
     viewMode?: PhotoViewMode;
     personRegions?: SerializedPersonRegion[];
@@ -238,6 +240,15 @@ export interface ProjectMetadata {
     smoothOutline?: number;
     artworkEdgeSmoothness?: number;
     artworkEdgeFeather?: number;
+    qualityMode?: 'fast' | 'better' | 'best';
+    extractionMode?: 'standard' | 'high-quality';
+    decontaminateEdge?: boolean;
+    hairDetail?: number;
+    accessoryMerge?: boolean;
+    fallbackConfidence?: string; // Base64 raw Float32Array bytes for single-pass segmentation
+    baseAlphaMatteData?: string; // Base64 original immutable neural alpha matte
+    alphaMatteData?: string; // Base64 resolved artwork alpha mask (1 byte/px)
+    decontaminatedData?: string; // Base64 decontaminated RGBA
   };
 }
 

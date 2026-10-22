@@ -26,8 +26,8 @@ interface ToolbarProps {
   fileName: string;
   viewMode: ViewMode;
   onViewModeChange: (mode: ViewMode) => void;
-  previewBg: 'checker' | 'dark' | 'light' | 'saturated';
-  onPreviewBgChange: (bg: 'checker' | 'dark' | 'light' | 'saturated') => void;
+  previewBg: 'checker' | 'dark' | 'light' | 'saturated' | 'white' | 'grey';
+  onPreviewBgChange: (bg: 'checker' | 'dark' | 'light' | 'saturated' | 'white' | 'grey') => void;
   canUndo: boolean;
   canRedo: boolean;
   onUndo: () => void;
