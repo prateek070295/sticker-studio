@@ -118,9 +118,19 @@ async function runAcceptance() {
     page.on('request', (req) => {
       const url = req.url();
       const method = req.method();
+      if (url.includes('.wasm') || url.includes('.mjs') || url.includes('modnet') || url.includes('onnx')) {
+        console.log(`  [Network Request] ${method} ${url}`);
+      }
       if (method === 'POST' && !url.includes('127.0.0.1') && !url.includes('localhost')) {
         console.warn(`[WARNING] External POST request detected: ${url}`);
         metrics.networkUploadsDetected++;
+      }
+    });
+
+    page.on('response', (res) => {
+      const url = res.url();
+      if (url.includes('.wasm') || url.includes('.mjs') || url.includes('modnet') || url.includes('onnx')) {
+        console.log(`  [Network Response] ${res.status()} ${url}`);
       }
     });
 
