@@ -530,6 +530,7 @@ describe('Sticker Studio Photo Mode — Focused Automated Test Suite', () => {
         root = null;
       }
       modnetDeferredPromise = null;
+      delete (globalThis as any).FileReader;
     }
 
     it('8a. Safely cancels in-flight High Quality inference when another photo is imported', async () => {
@@ -720,6 +721,93 @@ describe('Sticker Studio Photo Mode — Focused Automated Test Suite', () => {
 
         expect(hookResult.sourceImage).toBeNull();
         expect(hookResult.mask).toBeNull();
+        expect(hookResult.isProcessing).toBe(false);
+      } finally {
+        tearDownMockDom();
+      }
+    });
+
+    it('8d. Safely invalidates in-flight FileReader when a saved project loads before FileReader finishes', async () => {
+      setupMockDom();
+      try {
+        let triggerFileReaderLoad: (() => void) | null = null;
+        (globalThis as any).FileReader = class MockFileReader {
+          onload: (() => void) | null = null;
+          onerror: ((err: any) => void) | null = null;
+          result: string | null = null;
+          readAsDataURL() {
+            triggerFileReaderLoad = () => {
+              this.result = 'data:image/png;base64,photoA_data';
+              if (this.onload) this.onload();
+            };
+          }
+        };
+
+        const mockFileA = new File(['dummyA'], 'photoA.jpg', { type: 'image/jpeg' });
+
+        // 1. Import A starts and FileReader remains pending
+        let importAPromise: Promise<void>;
+        act(() => {
+          importAPromise = hookResult.importPhoto(mockFileA);
+        });
+
+        // FileReader is still pending (triggerFileReaderLoad has not been called)
+        expect(triggerFileReaderLoad).not.toBeNull();
+
+        // 2. Project B loads while FileReader A is pending
+        const projectBSource = new (globalThis as any).ImageData(100, 100);
+        projectBSource.data[0] = 42; // Distinct marker
+        const projectBAlpha = new Uint8Array(100 * 100).fill(255);
+        const mockLoadedProjectB: LoadedProjectData = {
+          metadata: {
+            version: '1.1',
+            schemaVersion: 2,
+            name: 'project_b_saved',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            sourceSha256: 'sha_project_b',
+            imageDimensions: { width: 100, height: 100 },
+            projectType: 'photo',
+            settings: {} as any,
+            globalBorderThickness: 20,
+            globalSolidBacking: false,
+            globalWhiteBacking: true,
+            photoSettings: {
+              borderThickness: 20,
+              previewBg: 'checker',
+              hasRemovedBackground: true,
+              extractionMode: 'standard',
+              viewMode: 'sticker',
+              isReviewMode: true,
+            },
+          },
+          sourceImage: projectBSource,
+          alphaMask: projectBAlpha,
+          labelMap: new Uint16Array(100 * 100),
+          components: [],
+          groups: [],
+          holes: [],
+        };
+
+        act(() => {
+          hookResult.loadPhotoProject(mockLoadedProjectB);
+        });
+
+        // Verify Project B is active
+        expect(hookResult.fileName).toBe('project_b_saved.png');
+        expect(hookResult.sourceImage?.data[0]).toBe(42);
+        expect(hookResult.mask![0]).toBe(1);
+
+        // 3. FileReader A completes
+        await act(async () => {
+          triggerFileReaderLoad!();
+          await importAPromise;
+        });
+
+        // 4. Project B remains intact, with no stale source-image replacement
+        expect(hookResult.fileName).toBe('project_b_saved.png');
+        expect(hookResult.sourceImage?.data[0]).toBe(42);
+        expect(hookResult.mask![0]).toBe(1);
         expect(hookResult.isProcessing).toBe(false);
       } finally {
         tearDownMockDom();

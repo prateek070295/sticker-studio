@@ -351,7 +351,7 @@ export function usePhotoMode(): UsePhotoModeReturn {
 
   // Load photo file
   const importPhoto = useCallback(async (file: File) => {
-    currentRunIdRef.current++;
+    const runId = ++currentRunIdRef.current;
     setIsProcessing(false);
     setProgressMessage('');
     setFileName(file.name);
@@ -361,6 +361,8 @@ export function usePhotoMode(): UsePhotoModeReturn {
       reader.onerror = reject;
       reader.readAsDataURL(file);
     });
+
+    if (runId !== currentRunIdRef.current) return;
 
     await importFromDataUrl(dataUrl, file.name);
   }, []);
